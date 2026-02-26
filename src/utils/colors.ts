@@ -610,26 +610,178 @@ export const SPINNER_FRAMES = [
   "⠏",
 ] as const;
 
-// ── Nerd Font Icons ─────────────────────────────────────────────────────────
-// All icons below use Nerd Font glyphs (Private Use Area).
-// Requires a Nerd Font patched terminal font to render correctly.
-// Reference: https://www.nerdfonts.com/cheat-sheet
+// ── Icon System ─────────────────────────────────────────────────────────────
+//
+// Three icon modes are supported:
+//
+//   "nerd"    — Nerd Font PUA glyphs (requires a patched terminal font).
+//               Reference: https://www.nerdfonts.com/cheat-sheet
+//
+//   "unicode" — Standard Unicode symbols that render in most modern terminals
+//               without any special font patching.
+//
+//   "ascii"   — Pure ASCII fallbacks for maximum portability (legacy terminals,
+//               CI logs, piped output, etc.).
+//
+// Default mode is "nerd". Call `setIconMode()` early in startup (e.g. after
+// loading the user config) to switch.
+// ─────────────────────────────────────────────────────────────────────────────
 
-export const CHECK_MARK = "\uf00c"; //  nf-fa-check
-export const CROSS_MARK = "\uf00d"; //  nf-fa-times
-export const WARNING_MARK = "\uf071"; //  nf-fa-warning
-export const INFO_MARK = "\uf05a"; //  nf-fa-info_circle
-export const ARROW_RIGHT = "\uf061"; //  nf-fa-arrow_right
-export const ARROW_DOWN = "\uf063"; //  nf-fa-arrow_down
-export const BULLET_POINT = "\uf111"; //  nf-fa-circle
-export const ELLIPSIS = "…";
-export const LOCK_ICON = "\uf023"; //  nf-fa-lock
-export const KEY_ICON = "\uf084"; //  nf-fa-key
-export const SHIELD_ICON = "\uf132"; //  nf-fa-shield
-export const BUG_ICON = "\uf188"; //  nf-fa-bug
-export const FOLDER_ICON = "\uf07b"; //  nf-fa-folder
-export const FILE_ICON = "\uf016"; //  nf-fa-file_o
-export const SEARCH_ICON = "\uf002"; //  nf-fa-search
-export const GEAR_ICON = "\uf013"; //  nf-fa-cog
-export const ROCKET_ICON = "\uf135"; //  nf-fa-rocket
-export const CHEVRON_RIGHT = "\uf054"; //  nf-fa-chevron_right
+export type IconMode = "nerd" | "unicode" | "ascii";
+
+/** Icon name → glyph for each supported mode. */
+interface IconSet {
+  CHECK_MARK: string;
+  CROSS_MARK: string;
+  WARNING_MARK: string;
+  INFO_MARK: string;
+  ARROW_RIGHT: string;
+  ARROW_DOWN: string;
+  BULLET_POINT: string;
+  ELLIPSIS: string;
+  LOCK_ICON: string;
+  KEY_ICON: string;
+  SHIELD_ICON: string;
+  BUG_ICON: string;
+  FOLDER_ICON: string;
+  FILE_ICON: string;
+  SEARCH_ICON: string;
+  GEAR_ICON: string;
+  ROCKET_ICON: string;
+  CHEVRON_RIGHT: string;
+}
+
+const NERD_ICONS: Readonly<IconSet> = {
+  CHECK_MARK: "\uf00c", //  nf-fa-check
+  CROSS_MARK: "\uf00d", //  nf-fa-times
+  WARNING_MARK: "\uf071", //  nf-fa-warning
+  INFO_MARK: "\uf05a", //  nf-fa-info_circle
+  ARROW_RIGHT: "\uf061", //  nf-fa-arrow_right
+  ARROW_DOWN: "\uf063", //  nf-fa-arrow_down
+  BULLET_POINT: "\uf111", //  nf-fa-circle
+  ELLIPSIS: "…",
+  LOCK_ICON: "\uf023", //  nf-fa-lock
+  KEY_ICON: "\uf084", //  nf-fa-key
+  SHIELD_ICON: "\uf132", //  nf-fa-shield
+  BUG_ICON: "\uf188", //  nf-fa-bug
+  FOLDER_ICON: "\uf07b", //  nf-fa-folder
+  FILE_ICON: "\uf016", //  nf-fa-file_o
+  SEARCH_ICON: "\uf002", //  nf-fa-search
+  GEAR_ICON: "\uf013", //  nf-fa-cog
+  ROCKET_ICON: "\uf135", //  nf-fa-rocket
+  CHEVRON_RIGHT: "\uf054", //  nf-fa-chevron_right
+};
+
+const UNICODE_ICONS: Readonly<IconSet> = {
+  CHECK_MARK: "✔",
+  CROSS_MARK: "✖",
+  WARNING_MARK: "⚠",
+  INFO_MARK: "ℹ",
+  ARROW_RIGHT: "→",
+  ARROW_DOWN: "↓",
+  BULLET_POINT: "●",
+  ELLIPSIS: "…",
+  LOCK_ICON: "🔒",
+  KEY_ICON: "🔑",
+  SHIELD_ICON: "🛡",
+  BUG_ICON: "🐛",
+  FOLDER_ICON: "📁",
+  FILE_ICON: "📄",
+  SEARCH_ICON: "🔍",
+  GEAR_ICON: "⚙",
+  ROCKET_ICON: "🚀",
+  CHEVRON_RIGHT: "›",
+};
+
+const ASCII_ICONS: Readonly<IconSet> = {
+  CHECK_MARK: "[ok]",
+  CROSS_MARK: "[x]",
+  WARNING_MARK: "[!]",
+  INFO_MARK: "[i]",
+  ARROW_RIGHT: "->",
+  ARROW_DOWN: "v",
+  BULLET_POINT: "*",
+  ELLIPSIS: "...",
+  LOCK_ICON: "[lock]",
+  KEY_ICON: "[key]",
+  SHIELD_ICON: "[shield]",
+  BUG_ICON: "[bug]",
+  FOLDER_ICON: "[dir]",
+  FILE_ICON: "[file]",
+  SEARCH_ICON: "[search]",
+  GEAR_ICON: "[gear]",
+  ROCKET_ICON: "[rocket]",
+  CHEVRON_RIGHT: ">",
+};
+
+const ICON_SETS: Record<IconMode, Readonly<IconSet>> = {
+  nerd: NERD_ICONS,
+  unicode: UNICODE_ICONS,
+  ascii: ASCII_ICONS,
+};
+
+// ── Current icon mode (mutable — use `let` for ESM live bindings) ───────
+
+let _iconMode: IconMode = "nerd";
+
+export let CHECK_MARK = NERD_ICONS.CHECK_MARK;
+export let CROSS_MARK = NERD_ICONS.CROSS_MARK;
+export let WARNING_MARK = NERD_ICONS.WARNING_MARK;
+export let INFO_MARK = NERD_ICONS.INFO_MARK;
+export let ARROW_RIGHT = NERD_ICONS.ARROW_RIGHT;
+export let ARROW_DOWN = NERD_ICONS.ARROW_DOWN;
+export let BULLET_POINT = NERD_ICONS.BULLET_POINT;
+export let ELLIPSIS = NERD_ICONS.ELLIPSIS;
+export let LOCK_ICON = NERD_ICONS.LOCK_ICON;
+export let KEY_ICON = NERD_ICONS.KEY_ICON;
+export let SHIELD_ICON = NERD_ICONS.SHIELD_ICON;
+export let BUG_ICON = NERD_ICONS.BUG_ICON;
+export let FOLDER_ICON = NERD_ICONS.FOLDER_ICON;
+export let FILE_ICON = NERD_ICONS.FILE_ICON;
+export let SEARCH_ICON = NERD_ICONS.SEARCH_ICON;
+export let GEAR_ICON = NERD_ICONS.GEAR_ICON;
+export let ROCKET_ICON = NERD_ICONS.ROCKET_ICON;
+export let CHEVRON_RIGHT = NERD_ICONS.CHEVRON_RIGHT;
+
+/**
+ * Switch every exported icon variable to the given mode.
+ *
+ * Call this once, early in startup, after loading the user's config:
+ *
+ * ```ts
+ * import { setIconMode } from "./utils/colors.js";
+ * setIconMode(config.display.iconMode);   // "nerd" | "unicode" | "ascii"
+ * ```
+ *
+ * Because the icon variables are `let` exports, all modules that imported
+ * them via ESM live bindings will see the updated values immediately.
+ */
+export function setIconMode(mode: IconMode): void {
+  const set = ICON_SETS[mode] ?? NERD_ICONS;
+  _iconMode = mode;
+  CHECK_MARK = set.CHECK_MARK;
+  CROSS_MARK = set.CROSS_MARK;
+  WARNING_MARK = set.WARNING_MARK;
+  INFO_MARK = set.INFO_MARK;
+  ARROW_RIGHT = set.ARROW_RIGHT;
+  ARROW_DOWN = set.ARROW_DOWN;
+  BULLET_POINT = set.BULLET_POINT;
+  ELLIPSIS = set.ELLIPSIS;
+  LOCK_ICON = set.LOCK_ICON;
+  KEY_ICON = set.KEY_ICON;
+  SHIELD_ICON = set.SHIELD_ICON;
+  BUG_ICON = set.BUG_ICON;
+  FOLDER_ICON = set.FOLDER_ICON;
+  FILE_ICON = set.FILE_ICON;
+  SEARCH_ICON = set.SEARCH_ICON;
+  GEAR_ICON = set.GEAR_ICON;
+  ROCKET_ICON = set.ROCKET_ICON;
+  CHEVRON_RIGHT = set.CHEVRON_RIGHT;
+}
+
+/**
+ * Return the currently active icon mode.
+ */
+export function getIconMode(): IconMode {
+  return _iconMode;
+}

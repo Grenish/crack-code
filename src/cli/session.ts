@@ -405,7 +405,7 @@ export class Session {
     // wrap them in the box. The box function pads each line to the
     // inner width automatically.
 
-    const KV_LABEL_WIDTH = 27; // visible-char width for left column labels
+    const KV_LABEL_WIDTH = 28; // visible-char width for left column labels
 
     /**
      * Format a key-value row with aligned columns.
@@ -423,21 +423,19 @@ export class Session {
     lines.push("");
 
     // Header
-    lines.push(
-      `${SHIELD_ICON}  ${bold(brightCyan(APP_NAME))} ${dim("—")} ${bold("Agent powering down.")} ${dim("Goodbye!")}`,
-    );
+    lines.push("Agent powering down. Goodbye!");
 
     // Blank separator
     lines.push("");
 
     // ── Interaction Summary ───────────────────────────────────────────
 
-    lines.push(bold(cyan("Interaction Summary")));
+    lines.push("Interaction Summary");
 
     lines.push(kvRow("Session ID:", snap.sessionId));
 
     // Tool Calls:  N (  S  F )
-    const toolCallsValue = `${toolTotal} ( ${green(CHECK_MARK)} ${green(String(toolOk))} ${red(CROSS_MARK)} ${red(String(toolFail))} )`;
+    const toolCallsValue = `${toolTotal} ( ${green("✓")} ${toolOk} ${red("x")} ${toolFail} )`;
     lines.push(kvRow("Tool Calls:", toolCallsValue));
 
     lines.push(kvRow("Success Rate:", `${successRate}%`));
@@ -447,7 +445,7 @@ export class Session {
 
     // ── Performance ───────────────────────────────────────────────────
 
-    lines.push(bold(cyan("Performance")));
+    lines.push("Performance");
 
     lines.push(kvRow("Wall Time:", wallTimeStr));
     lines.push(kvRow("Agent Active:", agentActiveStr));
@@ -457,11 +455,11 @@ export class Session {
     // If there were API calls, show token usage
     if (snap.apiCalls.total > 0) {
       lines.push("");
-      lines.push(bold(cyan("Token Usage")));
+      lines.push("Token Usage");
       lines.push(
         kvRow(
           "API Calls:",
-          `${snap.apiCalls.total} ( ${green(CHECK_MARK)} ${green(String(snap.apiCalls.successes))} ${red(CROSS_MARK)} ${red(String(snap.apiCalls.failures))} )`,
+          `${snap.apiCalls.total} ( ${green("✓")} ${snap.apiCalls.successes} ${red("x")} ${snap.apiCalls.failures} )`,
         ),
       );
       lines.push(
@@ -472,7 +470,7 @@ export class Session {
     // If there were scans, show scan stats
     if (snap.scanCount > 0) {
       lines.push("");
-      lines.push(bold(cyan("Scan Results")));
+      lines.push("Scan Results");
       lines.push(kvRow("Scans Completed:", String(snap.scanCount)));
       lines.push(kvRow("Findings:", String(snap.findingCount)));
     }

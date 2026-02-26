@@ -93,6 +93,7 @@ export const AI_PROVIDER = {
   ANTHROPIC: "anthropic",
   OPENAI: "openai",
   GEMINI: "gemini",
+  VERTEX_AI: "vertex_ai",
   COHERE: "cohere",
   XAI: "xai",
   QWEN: "qwen",
@@ -107,6 +108,7 @@ export const AI_PROVIDER_LABELS: Record<AIProvider, string> = {
   [AI_PROVIDER.ANTHROPIC]: "Anthropic Claude",
   [AI_PROVIDER.OPENAI]: "OpenAI ChatGPT",
   [AI_PROVIDER.GEMINI]: "Google Gemini",
+  [AI_PROVIDER.VERTEX_AI]: "Google Vertex AI",
   [AI_PROVIDER.COHERE]: "Cohere Command",
   [AI_PROVIDER.XAI]: "xAI Grok",
   [AI_PROVIDER.QWEN]: "Alibaba Qwen",
@@ -119,6 +121,7 @@ export const AI_PROVIDER_BASE_URLS: Record<AIProvider, string> = {
   [AI_PROVIDER.ANTHROPIC]: "https://api.anthropic.com",
   [AI_PROVIDER.OPENAI]: "https://api.openai.com",
   [AI_PROVIDER.GEMINI]: "https://generativelanguage.googleapis.com",
+  [AI_PROVIDER.VERTEX_AI]: "https://us-central1-aiplatform.googleapis.com",
   [AI_PROVIDER.COHERE]: "https://api.cohere.com",
   [AI_PROVIDER.XAI]: "https://api.x.ai",
   [AI_PROVIDER.QWEN]: "https://dashscope.aliyuncs.com",
@@ -131,6 +134,7 @@ export const AI_PROVIDER_ENV_KEYS: Record<AIProvider, string> = {
   [AI_PROVIDER.ANTHROPIC]: "ANTHROPIC_API_KEY",
   [AI_PROVIDER.OPENAI]: "OPENAI_API_KEY",
   [AI_PROVIDER.GEMINI]: "GEMINI_API_KEY",
+  [AI_PROVIDER.VERTEX_AI]: "VERTEX_AI_ACCESS_TOKEN",
   [AI_PROVIDER.COHERE]: "COHERE_API_KEY",
   [AI_PROVIDER.XAI]: "XAI_API_KEY",
   [AI_PROVIDER.QWEN]: "DASHSCOPE_API_KEY",
@@ -267,6 +271,24 @@ export const MODEL_DISCOVERY: Record<AIProvider, ModelDiscoveryConfig> = {
     modelIdKey: "name",
     modelDisplayNameKey: "displayName",
     toolCallDetection: "generation_methods",
+  },
+
+  // ── Google Vertex AI ──────────────────────────────────────────────────
+  // GET https://{REGION}-aiplatform.googleapis.com/v1/publishers/google/models
+  // Auth: Bearer access token (from gcloud or service account)
+  // Response: { models: [{ name, displayName, supportedGenerationMethods }] }
+  // The base URL must include the region, e.g. https://us-central1-aiplatform.googleapis.com
+  // Project ID and region are set via GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_REGION
+  // env vars or encoded in the base URL.
+  // Tool-calling: same as Gemini — check supportedGenerationMethods.
+  [AI_PROVIDER.VERTEX_AI]: {
+    method: "GET",
+    path: "/v1/publishers/google/models",
+    authStyle: "bearer",
+    modelsArrayPath: "models",
+    modelIdKey: "name",
+    modelDisplayNameKey: "displayName",
+    toolCallDetection: "all",
   },
 
   // ── Cohere ────────────────────────────────────────────────────────────
@@ -678,6 +700,7 @@ export const COMMANDS = {
   TOOLS: "/tools",
   MCP: "/mcp",
   HUD: "/hud",
+  ICONS: "/icons",
   EXIT: "/exit",
   QUIT: "/quit",
   CLEAR: "/clear",

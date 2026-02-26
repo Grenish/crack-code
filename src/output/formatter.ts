@@ -684,34 +684,37 @@ export function formatStreamingIndicator(tokens: number): string {
 
 /**
  * Render the agent's thinking/processing indicator.
+ * @deprecated Use formatThinkingSpinner for the new TUI style.
  */
-export function formatThinkingIndicator(toolName?: string): string {
-  if (toolName) {
-    return dim(`  ${GEAR_ICON} Using tool: ${cyan(toolName)}...`);
-  }
-  return dim(`  ${GEAR_ICON} Analyzing...`);
+export function formatThinkingIndicator(phase?: string): string {
+  const text = phase || "Thinking...";
+  return `  ${cyan(GEAR_ICON)} ${dim(text)}`;
 }
 
 /**
  * Render a tool call start message.
+ * @deprecated Use formatToolCallCompact for the new TUI style.
  */
 export function formatToolCallStart(
   toolName: string,
   args?: Record<string, unknown>,
 ): string {
   const lines: string[] = [];
-  lines.push(`  ${dim(ARROW_RIGHT)} ${cyan(toolName)}`);
+  lines.push(
+    `  ${cyan(GEAR_ICON)} ${bold(cyan("Using tool:"))} ${white(toolName)}`,
+  );
   if (args && Object.keys(args).length > 0) {
     const argStr = Object.entries(args)
-      .map(([k, v]) => `${dim(k)}=${dim(JSON.stringify(v))}`)
+      .map(([k, v]) => `${cyan(k)}=${green(JSON.stringify(v))}`)
       .join(" ");
-    lines.push(`    ${dim(argStr)}`);
+    lines.push(`    ${dim("Args:")} ${argStr}`);
   }
   return lines.join("\n");
 }
 
 /**
  * Render a tool call result message.
+ * @deprecated Use formatToolResultCompact for the new TUI style.
  */
 export function formatToolCallResult(
   toolName: string,
@@ -723,15 +726,315 @@ export function formatToolCallResult(
   const dur = dim(`(${(durationMs / 1000).toFixed(1)}s)`);
   const lines: string[] = [];
 
-  lines.push(`  ${status} ${cyan(toolName)} ${dur}`);
+  lines.push(
+    `  ${status} ${bold(success ? green("Tool success:") : red("Tool failed:"))} ${white(toolName)} ${dur}`,
+  );
 
   if (preview) {
-    const previewLines = preview.split("\n").slice(0, 3);
+    const allLines = preview.split("\n");
+    const previewLines = allLines.slice(0, 10);
     for (const pl of previewLines) {
-      const truncated = pl.length > 80 ? pl.slice(0, 77) + "..." : pl;
-      lines.push(`    ${dim(truncated)}`);
+      const truncated = pl.length > 120 ? pl.slice(0, 117) + "..." : pl;
+      lines.push(`    ${dim("│")} ${gray(truncated)}`);
+    }
+    if (allLines.length > 10) {
+      lines.push(
+        `    ${dim("│")} ${dim(`... (${allLines.length - 10} more lines)`)}`,
+      );
     }
   }
+
+  return lines.join("\n");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// New TUI Formatters (ui.md spec — Fig. 2, 3, 4)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── Thinking Spinner ────────────────────────────────────────────────────────
+
+/**
+ * Spinner frames for the thinking indicator: ◐ ◓ ◑ ◒
+ * Cycle through these with an incrementing counter to animate.
+ */
+export const THINKING_FRAMES = ["◐", "◓", "◑", "◒"] as const;
+
+/**
+ * Render a thinking/processing line with a spinning half-circle.
+ *
+ * Matches ui.md Fig. 3:
+ *   ◐ Let me analyze the codebase for security concerns.
+ *
+ * The text is rendered in dim/gray to distinguish thinking from output.
+ *
+ * @param frameIndex - An incrementing number (mod 4 applied internally).
+ * @param text       - The thinking text to display.
+ */
+export function formatThinkingSpinner(
+  frameIndex: number,
+  text: string,
+): string {
+  const frame = THINKING_FRAMES[frameIndex % THINKING_FRAMES.length]!;
+  return `\r${cyan(frame)} ${dim(text)}`;
+}
+
+// ── User Input Echo ─────────────────────────────────────────────────────────
+
+/**
+ * Echo the user's input after they press Enter.
+ *
+ * Matches ui.md Fig. 3:
+ *   ❯ analyze the codebase and check for the security concerns
+ *
+ * @param input - The raw user input string.
+ */
+export function formatUserInput(input: string): string {
+  return `${bold(brightCyan("❯"))} ${white(input)}`;
+}
+
+// ── Compact Tool Call Display ───────────────────────────────────────────────
+
+/**
+ * Build a human-readable description of a tool call for display.
+ *
+ * Translates raw tool names + args into natural descriptions:
+ *   "list_directory" { path: "." }  →  "List directory ."
+ *   "read_file" { path: "pkg.json" } →  "Read pkg.json"
+ *   "execute_command" { command: "cat ..." } →  "$ cat ..."
+ */
+function describeToolCall(
+  toolName: string,
+  args?: Record<string, unknown>,
+): string {
+  const name = toolName.toLowerCase();
+
+  // File-system tools
+  if (name === "list_directory" || name === "ls") {
+    const target =
+      (args?.["path"] as string) ?? (args?.["directory"] as string) ?? ".";
+    return `List directory ${target}`;
+  }
+  if (name === "read_file" || name === "cat") {
+    const target =
+      (args?.["path"] as string) ?? (args?.["file"] as string) ?? "";
+    const label = target ? shortenPath(target) : "file";
+    return `Read ${label}`;
+  }
+  if (name === "write_file") {
+    const target = (args?.["path"] as string) ?? "";
+    const label = target ? shortenPath(target) : "file";
+    return `Write ${label}`;
+  }
+  if (name === "search_files" || name === "grep") {
+    const pattern =
+      (args?.["pattern"] as string) ?? (args?.["query"] as string) ?? "";
+    return pattern ? `Search for "${pattern}"` : "Search files";
+  }
+
+  // Command execution
+  if (
+    name === "execute_command" ||
+    name === "run_command" ||
+    name === "shell"
+  ) {
+    const purpose =
+      (args?.["purpose"] as string) ?? (args?.["description"] as string);
+    if (purpose) return purpose;
+
+    const cmd = (args?.["command"] as string) ?? "";
+    if (cmd) {
+      const bin = cmd.trim().split(/\s+/)[0];
+      if (bin) return `Run ${bin}`;
+    }
+    return "Execute command";
+  }
+
+  // Fallback: humanize the tool name
+  const humanName = toolName
+    .replace(/[_-]/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+  if (args && Object.keys(args).length > 0) {
+    // Pick the first "interesting" arg value for context
+    const firstVal = Object.values(args)[0];
+    const valStr =
+      typeof firstVal === "string"
+        ? firstVal.length > 50
+          ? firstVal.slice(0, 47) + "..."
+          : firstVal
+        : JSON.stringify(firstVal);
+    return `${humanName} ${valStr}`;
+  }
+
+  return humanName;
+}
+
+/**
+ * Render a compact tool-call-start line.
+ *
+ * Matches ui.md Fig. 3:
+ *   ● List directory .
+ *   ● Read package.json for dependencies
+ *
+ * @param toolName - Raw tool function name.
+ * @param args     - Tool arguments (used to build the description).
+ */
+export function formatToolCallCompact(
+  toolName: string,
+  args?: Record<string, unknown>,
+): string {
+  const description = describeToolCall(toolName, args);
+  let result = `${cyan("●")} ${white(description)}`;
+
+  const name = toolName.toLowerCase();
+  if (name === "read_file" || name === "cat") {
+    const target =
+      (args?.["path"] as string) ?? (args?.["file"] as string) ?? "";
+    if (target) {
+      result += `\n  ${dim("$")} ${dim(`cat ${target}`)}`;
+    }
+  } else if (
+    name === "execute_command" ||
+    name === "run_command" ||
+    name === "shell"
+  ) {
+    const cmd = (args?.["command"] as string) ?? "";
+    if (cmd) {
+      const short = cmd.length > 120 ? cmd.slice(0, 117) + "..." : cmd;
+      result += `\n  ${dim("$")} ${dim(short)}`;
+    }
+  } else if (name === "search_files" || name === "grep") {
+    const pattern =
+      (args?.["pattern"] as string) ?? (args?.["query"] as string) ?? "";
+    const target =
+      (args?.["path"] as string) ?? (args?.["directory"] as string) ?? ".";
+    if (pattern) {
+      result += `\n  ${dim("$")} ${dim(`grep -r "${pattern}" ${target}`)}`;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Render a compact tool-call-result line.
+ *
+ * Matches ui.md Fig. 3:
+ *   └ 17 files found
+ *   └ 45 lines...
+ *
+ * @param toolName   - Raw tool function name.
+ * @param success    - Whether the tool call succeeded.
+ * @param durationMs - How long the call took.
+ * @param preview    - Optional preview/result text.
+ */
+export function formatToolResultCompact(
+  toolName: string,
+  success: boolean,
+  durationMs: number,
+  preview?: string,
+): string {
+  if (!success) {
+    return `  ${red("└")} ${red("failed")} ${dim(`(${(durationMs / 1000).toFixed(1)}s)`)}`;
+  }
+
+  // Build a concise summary from the preview
+  let summary = "";
+  if (preview) {
+    const lines = preview.split("\n").filter((l) => l.trim().length > 0);
+    const lineCount = lines.length;
+    const name = toolName.toLowerCase();
+
+    if (name === "list_directory" || name === "ls") {
+      summary = `${lineCount} files found`;
+    } else if (name === "read_file" || name === "cat") {
+      summary = `${lineCount} lines${lineCount > 1 ? "..." : ""}`;
+    } else if (name === "search_files" || name === "grep") {
+      summary = `${lineCount} match${lineCount !== 1 ? "es" : ""}`;
+    } else if (
+      name === "execute_command" ||
+      name === "run_command" ||
+      name === "shell"
+    ) {
+      summary = `${lineCount} lines...`;
+    } else if (lineCount > 0) {
+      // Generic: show first line truncated
+      const first = lines[0]!;
+      summary = first.length > 60 ? first.slice(0, 57) + "..." : first;
+      if (lineCount > 1) {
+        summary += dim(` (+${lineCount - 1} more)`);
+      }
+    }
+  }
+
+  if (!summary) {
+    summary = "done";
+  }
+
+  return `  ${dim("└")} ${dim(summary)}`;
+}
+
+// ── Progress Indicator ──────────────────────────────────────────────────────
+
+/**
+ * Render a progress / status indicator line.
+ *
+ * Matches ui.md Fig. 3:
+ *   ◎ Analyzing codebase security (Esc to cancel · 12.34 KiB · 1200 tokens)
+ *   ◎ Analyzed the codebase security (1200 tokens)
+ *
+ * @param label    - What's being done (e.g. "Analyzing codebase security").
+ * @param detail   - Optional detail string (e.g. "Esc to cancel · 1.2 KiB").
+ * @param active   - true = in-progress (animated), false = completed.
+ */
+export function formatProgressIndicator(
+  label: string,
+  detail?: string,
+  active: boolean = true,
+): string {
+  const icon = active ? cyan("◎") : green("◎");
+  const detailStr = detail ? ` ${dim(`(${detail})`)}` : "";
+  return `${icon} ${white(label)}${detailStr}`;
+}
+
+// ── Prompt Context Bar ──────────────────────────────────────────────────────
+
+/**
+ * Render the context status bar shown above the input prompt.
+ *
+ * Matches ui.md Fig. 2:
+ *   ~(current directory) ( branch name)                     (model name)
+ *   ─────────────────────────────────────────────────────────────────────
+ *   > Type @ to mention files, / for commands, or /help for help
+ *   ─────────────────────────────────────────────────────────────────────
+ *
+ * @param targetPath - Current working directory.
+ * @param branch     - Git branch name (empty if not a repo).
+ * @param modelName  - Active model name.
+ */
+export function formatPromptContextBar(
+  targetPath: string,
+  branch: string,
+  modelName: string,
+): string {
+  const width = getTermWidth();
+  const lines: string[] = [];
+
+  // Line 1: directory + branch on left, model on right
+  const displayPath = shortenPath(targetPath);
+  const leftPart = branch
+    ? `${cyan("~" + displayPath)} ${dim("(")} ${magenta(branch)} ${dim(")")}`
+    : `${cyan("~" + displayPath)}`;
+  const rightPart = dim(modelName || "no model");
+
+  const leftVisible = stripAnsi(leftPart).length;
+  const rightVisible = stripAnsi(rightPart).length;
+  const gap = Math.max(2, width - leftVisible - rightVisible - 2);
+
+  lines.push(leftPart + " ".repeat(gap) + rightPart);
+
+  // Line 2: horizontal rule (readline's `> ` prompt follows directly after)
+  lines.push(dim("─".repeat(width)));
 
   return lines.join("\n");
 }

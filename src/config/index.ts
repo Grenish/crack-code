@@ -76,6 +76,15 @@ export interface DisplayConfig {
   showTimestamps: boolean;
   /** Color mode: 'auto' | 'always' | 'never' */
   colorMode: "auto" | "always" | "never";
+  /**
+   * Icon rendering mode:
+   *   "nerd"    — Nerd Font PUA glyphs (requires a patched terminal font).
+   *   "unicode" — Standard Unicode symbols (most modern terminals).
+   *   "ascii"   — Pure ASCII fallbacks (CI, piped output, legacy terminals).
+   *
+   * Default: "nerd"
+   */
+  iconMode: "nerd" | "unicode" | "ascii";
 }
 
 /** The complete persisted configuration */
@@ -125,6 +134,7 @@ export function createDefaultConfig(): CrackCodeConfig {
       hudEnabled: true,
       showTimestamps: false,
       colorMode: "auto",
+      iconMode: "nerd",
     },
     lastScanPath: "",
     wizardCompleted: false,
@@ -134,7 +144,9 @@ export function createDefaultConfig(): CrackCodeConfig {
 /** Best-effort inference of a human-readable host/user name. */
 function inferHostName(): string {
   const env =
-    typeof process !== "undefined" ? process.env : ({} as Record<string, string | undefined>);
+    typeof process !== "undefined"
+      ? process.env
+      : ({} as Record<string, string | undefined>);
   return (
     env["USER"] ??
     env["USERNAME"] ??
@@ -203,7 +215,7 @@ export async function saveConfig(config: CrackCodeConfig): Promise<void> {
  */
 function mergeWithDefaults(
   partial: Partial<CrackCodeConfig>,
-  defaults: CrackCodeConfig
+  defaults: CrackCodeConfig,
 ): CrackCodeConfig {
   return {
     version: partial.version ?? defaults.version,
@@ -314,7 +326,7 @@ export function getProviderLabel(config: CrackCodeConfig): string {
 export function mcpProviderRequiresKey(config: CrackCodeConfig): boolean {
   if (!config.mcp.provider) return false;
   return (MCP_PROVIDERS_REQUIRING_KEY as readonly string[]).includes(
-    config.mcp.provider
+    config.mcp.provider,
   );
 }
 
@@ -329,7 +341,7 @@ export function setProvider(
   providerId: AIProvider,
   apiKey: string,
   defaultModel: string,
-  baseUrl: string = ""
+  baseUrl: string = "",
 ): CrackCodeConfig {
   return {
     ...config,
@@ -347,7 +359,7 @@ export function setProvider(
  */
 export function setApiKey(
   config: CrackCodeConfig,
-  apiKey: string
+  apiKey: string,
 ): CrackCodeConfig {
   return {
     ...config,
@@ -363,7 +375,7 @@ export function setApiKey(
  */
 export function setDefaultModel(
   config: CrackCodeConfig,
-  modelId: string
+  modelId: string,
 ): CrackCodeConfig {
   return {
     ...config,
@@ -381,14 +393,12 @@ export function setMCP(
   config: CrackCodeConfig,
   enabled: boolean,
   provider: MCPProvider | null,
-  apiKey: string = ""
+  apiKey: string = "",
 ): CrackCodeConfig {
   const enabledServers = [...config.mcp.enabledServers];
 
   // Ensure Context7 is always present
-  if (
-    !enabledServers.includes(MCP_PROVIDER.CONTEXT7)
-  ) {
+  if (!enabledServers.includes(MCP_PROVIDER.CONTEXT7)) {
     enabledServers.push(MCP_PROVIDER.CONTEXT7);
   }
 
@@ -413,7 +423,7 @@ export function setMCP(
  */
 export function setDisplay(
   config: CrackCodeConfig,
-  updates: Partial<DisplayConfig>
+  updates: Partial<DisplayConfig>,
 ): CrackCodeConfig {
   return {
     ...config,
@@ -427,9 +437,7 @@ export function setDisplay(
 /**
  * Mark the wizard as completed.
  */
-export function markWizardCompleted(
-  config: CrackCodeConfig
-): CrackCodeConfig {
+export function markWizardCompleted(config: CrackCodeConfig): CrackCodeConfig {
   return {
     ...config,
     wizardCompleted: true,
@@ -441,7 +449,7 @@ export function markWizardCompleted(
  */
 export function setLastScanPath(
   config: CrackCodeConfig,
-  scanPath: string
+  scanPath: string,
 ): CrackCodeConfig {
   return {
     ...config,
@@ -471,7 +479,7 @@ export function validateConfig(config: CrackCodeConfig): ConfigValidation {
   if (!validProviders.includes(config.provider.id)) {
     errors.push(
       `Unknown AI provider: "${config.provider.id}". ` +
-        `Valid options: ${validProviders.join(", ")}`
+        `Valid options: ${validProviders.join(", ")}`,
     );
   }
 
@@ -481,11 +489,11 @@ export function validateConfig(config: CrackCodeConfig): ConfigValidation {
     if (!key) {
       errors.push(
         `No API key configured for ${getProviderLabel(config)}. ` +
-          `Set it in the config or via the ${AI_PROVIDER_ENV_KEYS[config.provider.id]} environment variable.`
+          `Set it in the config or via the ${AI_PROVIDER_ENV_KEYS[config.provider.id]} environment variable.`,
       );
     } else if (key.length < 10) {
       warnings.push(
-        `API key for ${getProviderLabel(config)} appears unusually short (${key.length} chars).`
+        `API key for ${getProviderLabel(config)} appears unusually short (${key.length} chars).`,
       );
     }
   }
@@ -506,7 +514,9 @@ export function validateConfig(config: CrackCodeConfig): ConfigValidation {
 
   // Model validation
   if (!config.provider.defaultModel) {
-    warnings.push("No default model selected. You will be prompted to choose one.");
+    warnings.push(
+      "No default model selected. You will be prompted to choose one.",
+    );
   }
 
   // MCP validation
@@ -515,7 +525,7 @@ export function validateConfig(config: CrackCodeConfig): ConfigValidation {
       const mcpKey = getEffectiveMCPApiKey(config);
       if (!mcpKey) {
         warnings.push(
-          `MCP provider "${config.mcp.provider}" requires an API key but none is set.`
+          `MCP provider "${config.mcp.provider}" requires an API key but none is set.`,
         );
       }
     }
@@ -546,7 +556,7 @@ export function validateConfig(config: CrackCodeConfig): ConfigValidation {
  */
 export async function appendAuditLog(
   entry: string,
-  category: "tool" | "config" | "mcp" | "agent" | "scan" = "tool"
+  category: "tool" | "config" | "mcp" | "agent" | "scan" = "tool",
 ): Promise<void> {
   try {
     await ensureConfigDir();
@@ -617,7 +627,7 @@ export async function saveHistory(history: ConversationHistory): Promise<void> {
   // Trim to max
   if (history.entries.length > history.maxEntries) {
     history.entries = history.entries.slice(
-      history.entries.length - history.maxEntries
+      history.entries.length - history.maxEntries,
     );
   }
 
@@ -649,6 +659,7 @@ export interface ConfigSummary {
   aiName: string;
   hostName: string;
   hudEnabled: boolean;
+  iconMode: "nerd" | "unicode" | "ascii";
   wizardCompleted: boolean;
   version: string;
 }
@@ -670,6 +681,7 @@ export function getConfigSummary(config: CrackCodeConfig): ConfigSummary {
     aiName: config.display.aiName,
     hostName: config.display.hostName,
     hudEnabled: config.display.hudEnabled,
+    iconMode: config.display.iconMode,
     wizardCompleted: config.wizardCompleted,
     version: config.version,
   };
@@ -694,7 +706,7 @@ export async function resetConfig(): Promise<CrackCodeConfig> {
  * Useful for debugging and sharing.
  */
 export function exportSanitizedConfig(
-  config: CrackCodeConfig
+  config: CrackCodeConfig,
 ): CrackCodeConfig {
   return {
     ...config,

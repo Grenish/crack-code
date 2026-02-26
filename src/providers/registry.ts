@@ -50,7 +50,8 @@ const registry = new Map<AIProvider, RegistryEntry>();
 let activeProviderId: AIProvider | null = null;
 
 /** Error handler called when provider operations fail silently */
-let onRegistryError: ((provider: AIProvider, error: string) => void) | null = null;
+let onRegistryError: ((provider: AIProvider, error: string) => void) | null =
+  null;
 
 // ── Registration ────────────────────────────────────────────────────────────
 
@@ -65,7 +66,10 @@ let onRegistryError: ((provider: AIProvider, error: string) => void) | null = nu
  * @param factory    - A function that accepts (apiKey, baseUrl) and returns
  *                     a fully constructed BaseProvider.
  */
-export function registerProvider(providerId: AIProvider, factory: ProviderFactory): void {
+export function registerProvider(
+  providerId: AIProvider,
+  factory: ProviderFactory,
+): void {
   registry.set(providerId, {
     factory,
     instance: null,
@@ -103,7 +107,10 @@ export function getRegisteredProviders(): AIProvider[] {
  * Get labels for all registered providers (for TUI selection menus).
  * Returns an array of { value, label } pairs.
  */
-export function getProviderChoices(): Array<{ value: AIProvider; label: string }> {
+export function getProviderChoices(): Array<{
+  value: AIProvider;
+  label: string;
+}> {
   return Array.from(registry.keys()).map((id) => ({
     value: id,
     label: AI_PROVIDER_LABELS[id],
@@ -122,7 +129,7 @@ export function setActiveProvider(providerId: AIProvider): void {
   if (!registry.has(providerId)) {
     throw new Error(
       `Cannot activate provider "${providerId}": not registered. ` +
-      `Registered providers: ${getRegisteredProviders().join(", ")}`
+        `Registered providers: ${getRegisteredProviders().join(", ")}`,
     );
   }
   activeProviderId = providerId;
@@ -163,13 +170,13 @@ export function hasActiveProvider(): boolean {
 export function resolveProvider(
   providerId: AIProvider,
   apiKey: string = "",
-  baseUrl?: string
+  baseUrl?: string,
 ): BaseProvider {
   const entry = registry.get(providerId);
   if (!entry) {
     throw new Error(
       `Provider "${providerId}" is not registered. ` +
-      `Available providers: ${getRegisteredProviders().join(", ")}`
+        `Available providers: ${getRegisteredProviders().join(", ")}`,
     );
   }
 
@@ -201,11 +208,14 @@ export function resolveProvider(
  * @returns The active BaseProvider instance.
  * @throws Error if no active provider is set or if it's not registered.
  */
-export function resolveActiveProvider(apiKey?: string, baseUrl?: string): BaseProvider {
+export function resolveActiveProvider(
+  apiKey?: string,
+  baseUrl?: string,
+): BaseProvider {
   if (!activeProviderId) {
     throw new Error(
       "No active AI provider is configured. " +
-      "Run the configuration wizard (/conf) to set one up."
+        "Run the configuration wizard (/conf) to set one up.",
     );
   }
   return resolveProvider(activeProviderId, apiKey, baseUrl);
@@ -261,7 +271,7 @@ export function destroyAllInstances(): void {
 export function recreateProvider(
   providerId: AIProvider,
   apiKey: string,
-  baseUrl?: string
+  baseUrl?: string,
 ): BaseProvider {
   destroyProviderInstance(providerId);
   return resolveProvider(providerId, apiKey, baseUrl);
@@ -283,7 +293,7 @@ const HEALTH_CHECK_COOLDOWN_MS = 30_000;
  */
 export async function checkProviderHealth(
   providerId: AIProvider,
-  force: boolean = false
+  force: boolean = false,
 ): Promise<ProviderHealthCheck> {
   const entry = registry.get(providerId);
   if (!entry) {
@@ -343,7 +353,7 @@ export async function checkProviderHealth(
  * Returns a map of provider ID → health check result.
  */
 export async function checkAllProvidersHealth(
-  force: boolean = false
+  force: boolean = false,
 ): Promise<Map<AIProvider, ProviderHealthCheck>> {
   const results = new Map<AIProvider, ProviderHealthCheck>();
   const checks: Promise<void>[] = [];
@@ -353,7 +363,7 @@ export async function checkAllProvidersHealth(
       checks.push(
         checkProviderHealth(id, force).then((result) => {
           results.set(id, result);
-        })
+        }),
       );
     }
   }
@@ -372,7 +382,7 @@ export async function checkAllProvidersHealth(
  * @returns The model fetch result.
  */
 export async function fetchProviderModels(
-  providerId: AIProvider
+  providerId: AIProvider,
 ): Promise<ModelFetchResult> {
   const entry = registry.get(providerId);
   if (!entry?.instance) {
@@ -420,7 +430,9 @@ export function getCachedModels(providerId: AIProvider): DiscoveredModel[] {
 /**
  * Get cached tool-calling models from a resolved provider instance.
  */
-export function getCachedToolCallingModels(providerId: AIProvider): DiscoveredModel[] {
+export function getCachedToolCallingModels(
+  providerId: AIProvider,
+): DiscoveredModel[] {
   const entry = registry.get(providerId);
   return entry?.instance?.getToolCallingModels() ?? [];
 }
@@ -484,7 +496,7 @@ export function getRegistrySummary(): {
   }
 
   const activeInstance = activeProviderId
-    ? registry.get(activeProviderId)?.instance ?? null
+    ? (registry.get(activeProviderId)?.instance ?? null)
     : null;
 
   return {
@@ -506,7 +518,7 @@ export function getRegistrySummary(): {
  * This is called when health checks or background operations fail.
  */
 export function setRegistryErrorHandler(
-  handler: (provider: AIProvider, error: string) => void
+  handler: (provider: AIProvider, error: string) => void,
 ): void {
   onRegistryError = handler;
 }
@@ -571,6 +583,7 @@ export async function registerAllBuiltinProviders(): Promise<void> {
     { id: AI_PROVIDER.ANTHROPIC, importPath: "./anthropic.js" },
     { id: AI_PROVIDER.OPENAI, importPath: "./openai.js" },
     { id: AI_PROVIDER.GEMINI, importPath: "./gemini.js" },
+    { id: AI_PROVIDER.VERTEX_AI, importPath: "./vertex-ai.js" },
     { id: AI_PROVIDER.COHERE, importPath: "./cohere.js" },
     { id: AI_PROVIDER.XAI, importPath: "./xai.js" },
     { id: AI_PROVIDER.QWEN, importPath: "./qwen.js" },
@@ -609,7 +622,7 @@ export async function bootstrapProvider(
   providerId: AIProvider,
   apiKey: string,
   modelId: string,
-  baseUrl?: string
+  baseUrl?: string,
 ): Promise<{ provider: BaseProvider; error?: string }> {
   // Ensure providers are registered
   if (registry.size === 0) {

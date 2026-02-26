@@ -637,6 +637,11 @@ export function renderHelpScreen(): string {
     [COMMANDS.TOOLS, "List available tools", "Built-in and custom tools"],
     [COMMANDS.MCP, "Manage MCP servers", "Add, remove, configure MCP"],
     [COMMANDS.HUD, "Toggle the dashboard HUD", "Show/hide the top panel"],
+    [
+      COMMANDS.ICONS,
+      "Switch icon rendering mode",
+      "Nerd Font, Unicode, or ASCII",
+    ],
     [COMMANDS.REPORT, "View last scan report", "Findings summary & details"],
     [COMMANDS.STATUS, "Show session status", "Provider health, scan stats"],
     [COMMANDS.CLEAR, "Clear the screen", ""],
@@ -757,6 +762,9 @@ export function renderStatusScreen(info: DashboardInfo): string {
   lines.push(`  ${dim("Host Name:")}    ${config.display.hostName}`);
   lines.push(
     `  ${dim("HUD:")}          ${config.display.hudEnabled ? green("enabled") : dim("disabled")}`,
+  );
+  lines.push(
+    `  ${dim("Icon Mode:")}    ${cyan(config.display.iconMode ?? "nerd")}`,
   );
   lines.push(`  ${dim("Version:")}      ${APP_VERSION}`);
   lines.push("");

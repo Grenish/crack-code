@@ -68,12 +68,17 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
  * Build a cache key from provider + baseUrl + apiKey (hashed loosely).
  * We include a truncated key fingerprint so switching keys invalidates cache.
  */
-function cacheKey(provider: AIProvider, baseUrl: string, apiKey: string): string {
-  const keyFingerprint = apiKey.length > 8
-    ? apiKey.slice(0, 4) + "..." + apiKey.slice(-4)
-    : apiKey.length > 0
-      ? "***"
-      : "none";
+function cacheKey(
+  provider: AIProvider,
+  baseUrl: string,
+  apiKey: string,
+): string {
+  const keyFingerprint =
+    apiKey.length > 8
+      ? apiKey.slice(0, 4) + "..." + apiKey.slice(-4)
+      : apiKey.length > 0
+        ? "***"
+        : "none";
   return `${provider}::${baseUrl}::${keyFingerprint}`;
 }
 
@@ -119,7 +124,7 @@ function getNestedValue(obj: unknown, path: string): unknown {
  */
 function detectToolCalling(
   modelObj: Record<string, unknown>,
-  config: ModelDiscoveryConfig
+  config: ModelDiscoveryConfig,
 ): boolean {
   switch (config.toolCallDetection) {
     // ── Every model returned is assumed to support tool calling ──────
@@ -172,7 +177,8 @@ function detectToolCalling(
       const capValue = getNestedValue(modelObj, config.capabilitiesPath);
 
       if (typeof capValue === "boolean") return capValue;
-      if (typeof capValue === "string") return capValue.toLowerCase() === "true";
+      if (typeof capValue === "string")
+        return capValue.toLowerCase() === "true";
 
       return Boolean(capValue);
     }
@@ -190,7 +196,7 @@ function detectToolCalling(
 function buildRequestUrl(
   baseUrl: string,
   config: ModelDiscoveryConfig,
-  apiKey: string
+  apiKey: string,
 ): string {
   // Strip trailing slash from base URL
   const base = baseUrl.replace(/\/+$/, "");
@@ -209,10 +215,10 @@ function buildRequestUrl(
  */
 function buildRequestHeaders(
   config: ModelDiscoveryConfig,
-  apiKey: string
+  apiKey: string,
 ): Record<string, string> {
   const headers: Record<string, string> = {
-    "Accept": "application/json",
+    Accept: "application/json",
     "Content-Type": "application/json",
   };
 
@@ -251,7 +257,7 @@ function buildRequestHeaders(
  */
 function extractModelsArray(
   responseBody: unknown,
-  config: ModelDiscoveryConfig
+  config: ModelDiscoveryConfig,
 ): Record<string, unknown>[] {
   const raw = getNestedValue(responseBody, config.modelsArrayPath);
 
@@ -262,7 +268,7 @@ function extractModelsArray(
   // Filter out entries that aren't objects
   return raw.filter(
     (item): item is Record<string, unknown> =>
-      typeof item === "object" && item !== null
+      typeof item === "object" && item !== null,
   );
 }
 
@@ -271,7 +277,7 @@ function extractModelsArray(
  */
 function extractModelId(
   modelObj: Record<string, unknown>,
-  config: ModelDiscoveryConfig
+  config: ModelDiscoveryConfig,
 ): string {
   const raw = getNestedValue(modelObj, config.modelIdKey);
   if (typeof raw !== "string") return "";
@@ -290,7 +296,7 @@ function extractModelId(
 function extractDisplayName(
   modelObj: Record<string, unknown>,
   config: ModelDiscoveryConfig,
-  fallbackId: string
+  fallbackId: string,
 ): string {
   if (config.modelDisplayNameKey) {
     const raw = getNestedValue(modelObj, config.modelDisplayNameKey);
@@ -316,7 +322,7 @@ export async function fetchModels(
   provider: AIProvider,
   apiKey: string,
   baseUrl?: string,
-  useCache: boolean = true
+  useCache: boolean = true,
 ): Promise<ModelFetchResult> {
   const effectiveBaseUrl = baseUrl ?? AI_PROVIDER_BASE_URLS[provider];
   const providerLabel = AI_PROVIDER_LABELS[provider];
@@ -485,7 +491,9 @@ export async function fetchModels(
 /**
  * Fetch tool-calling models from Anthropic Claude.
  */
-export async function fetchAnthropicModels(apiKey: string): Promise<ModelFetchResult> {
+export async function fetchAnthropicModels(
+  apiKey: string,
+): Promise<ModelFetchResult> {
   return fetchModels(AI_PROVIDER.ANTHROPIC, apiKey);
 }
 
@@ -493,21 +501,16 @@ export async function fetchAnthropicModels(apiKey: string): Promise<ModelFetchRe
  * Fetch tool-calling models from OpenAI.
  * Filters to only chat-relevant models (gpt-*, o1-*, o3-*, o4-*, chatgpt-*).
  */
-export async function fetchOpenAIModels(apiKey: string): Promise<ModelFetchResult> {
+export async function fetchOpenAIModels(
+  apiKey: string,
+): Promise<ModelFetchResult> {
   const result = await fetchModels(AI_PROVIDER.OPENAI, apiKey);
 
   if (!result.ok) return result;
 
   // OpenAI returns many models including embeddings, whisper, dall-e, tts etc.
   // Filter to only chat/completion models that are relevant for our use case.
-  const chatModelPrefixes = [
-    "gpt-4",
-    "gpt-3.5",
-    "o1",
-    "o3",
-    "o4",
-    "chatgpt",
-  ];
+  const chatModelPrefixes = ["gpt-4", "gpt-3.5", "o1", "o3", "o4", "chatgpt"];
 
   // Models to explicitly exclude (fine-tuned snapshots, instruct variants
   // that don't support tool calling well, etc.)
@@ -521,7 +524,7 @@ export async function fetchOpenAIModels(apiKey: string): Promise<ModelFetchResul
 
     // Must start with one of the known chat prefixes
     const matchesPrefix = chatModelPrefixes.some((prefix) =>
-      id.startsWith(prefix)
+      id.startsWith(prefix),
     );
     if (!matchesPrefix) return false;
 
@@ -545,35 +548,59 @@ export async function fetchOpenAIModels(apiKey: string): Promise<ModelFetchResul
  * Only returns models that include "generateContent" in their
  * supportedGenerationMethods.
  */
-export async function fetchGeminiModels(apiKey: string): Promise<ModelFetchResult> {
+export async function fetchGeminiModels(
+  apiKey: string,
+): Promise<ModelFetchResult> {
   return fetchModels(AI_PROVIDER.GEMINI, apiKey);
+}
+
+/**
+ * Fetch tool-calling models from Google Vertex AI.
+ *
+ * Uses Bearer token authentication and the Vertex AI publisher endpoint.
+ * The base URL should be the regional endpoint, e.g.
+ * `https://us-central1-aiplatform.googleapis.com`.
+ */
+export async function fetchVertexAIModels(
+  accessToken: string,
+  baseUrl?: string,
+): Promise<ModelFetchResult> {
+  return fetchModels(AI_PROVIDER.VERTEX_AI, accessToken, baseUrl);
 }
 
 /**
  * Fetch tool-calling models from Cohere.
  */
-export async function fetchCohereModels(apiKey: string): Promise<ModelFetchResult> {
+export async function fetchCohereModels(
+  apiKey: string,
+): Promise<ModelFetchResult> {
   return fetchModels(AI_PROVIDER.COHERE, apiKey);
 }
 
 /**
  * Fetch models from xAI (Grok).
  */
-export async function fetchXAIModels(apiKey: string): Promise<ModelFetchResult> {
+export async function fetchXAIModels(
+  apiKey: string,
+): Promise<ModelFetchResult> {
   return fetchModels(AI_PROVIDER.XAI, apiKey);
 }
 
 /**
  * Fetch models from Alibaba Qwen via DashScope.
  */
-export async function fetchQwenModels(apiKey: string): Promise<ModelFetchResult> {
+export async function fetchQwenModels(
+  apiKey: string,
+): Promise<ModelFetchResult> {
   return fetchModels(AI_PROVIDER.QWEN, apiKey);
 }
 
 /**
  * Fetch models from Moonshot (Kimi).
  */
-export async function fetchMoonshotModels(apiKey: string): Promise<ModelFetchResult> {
+export async function fetchMoonshotModels(
+  apiKey: string,
+): Promise<ModelFetchResult> {
   return fetchModels(AI_PROVIDER.MOONSHOT, apiKey);
 }
 
@@ -583,7 +610,7 @@ export async function fetchMoonshotModels(apiKey: string): Promise<ModelFetchRes
  * @param serverUrl - The Ollama server URL (default: http://localhost:11434)
  */
 export async function fetchOllamaModels(
-  serverUrl: string = "http://localhost:11434"
+  serverUrl: string = "http://localhost:11434",
 ): Promise<ModelFetchResult> {
   return fetchModels(AI_PROVIDER.OLLAMA, "", serverUrl);
 }
@@ -602,7 +629,7 @@ export interface ProviderFetchConfig {
  * Returns a map of provider → result.
  */
 export async function fetchModelsFromMultipleProviders(
-  configs: ProviderFetchConfig[]
+  configs: ProviderFetchConfig[],
 ): Promise<Map<AIProvider, ModelFetchResult>> {
   const results = new Map<AIProvider, ModelFetchResult>();
 
@@ -627,7 +654,7 @@ export async function fetchModelsFromMultipleProviders(
 export async function validateProviderConnection(
   provider: AIProvider,
   apiKey: string,
-  baseUrl?: string
+  baseUrl?: string,
 ): Promise<{ valid: boolean; error?: string; modelCount: number }> {
   const result = await fetchModels(provider, apiKey, baseUrl, false);
 
@@ -650,7 +677,7 @@ export async function validateProviderConnection(
  * Check if Ollama is running and reachable at the given server URL.
  */
 export async function isOllamaReachable(
-  serverUrl: string = "http://localhost:11434"
+  serverUrl: string = "http://localhost:11434",
 ): Promise<boolean> {
   try {
     const response = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/tags`, {
@@ -673,13 +700,10 @@ export async function isOllamaReachable(
  *   "model-id  (Display Name)" or just "model-id" if names match.
  */
 export function formatModelChoices(
-  models: DiscoveredModel[]
+  models: DiscoveredModel[],
 ): Array<{ value: string; label: string }> {
   return models.map((m) => {
-    const label =
-      m.displayName !== m.id
-        ? `${m.id}  (${m.displayName})`
-        : m.id;
+    const label = m.displayName !== m.id ? `${m.id}  (${m.displayName})` : m.id;
 
     return { value: m.id, label };
   });

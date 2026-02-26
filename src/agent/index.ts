@@ -69,7 +69,7 @@ export interface AgentConfig {
   mcpCall?: (
     serverName: string,
     method: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
   ) => Promise<{ success: boolean; result: unknown; error?: string }>;
   /** Custom system prompt additions (appended to SYSTEM_PROMPT_PREFIX) */
   systemPromptSuffix?: string;
@@ -93,7 +93,7 @@ export interface AgentConfig {
   onToolCallEnd?: (
     toolName: string,
     result: ToolExecutionResult,
-    durationMs: number
+    durationMs: number,
   ) => void;
   /** Callback invoked when a thinking/processing phase starts */
   onThinking?: (phase: string) => void;
@@ -103,7 +103,7 @@ export interface AgentConfig {
   customToolExecutor?: (
     name: string,
     input: Record<string, unknown>,
-    context: ToolContext
+    context: ToolContext,
   ) => Promise<ToolExecutionResult>;
 }
 
@@ -246,7 +246,7 @@ export class Agent {
    */
   async processMessage(
     userMessage: string,
-    fileContext?: string
+    fileContext?: string,
   ): Promise<AgentResponse> {
     const startMs = Date.now();
     const session = getSession();
@@ -291,7 +291,9 @@ export class Agent {
 
       if (this.config.onThinking) {
         this.config.onThinking(
-          iteration === 1 ? "Thinking..." : `Processing (iteration ${iteration})...`
+          iteration === 1
+            ? "Thinking..."
+            : `Processing (iteration ${iteration})...`,
         );
       }
 
@@ -304,8 +306,7 @@ export class Agent {
       const apiStartMs = Date.now();
 
       try {
-        if (this.config.streaming && this.config.onStreamDelta && iteration === 1) {
-          // Only stream the first response (tool calls are non-streamed)
+        if (this.config.streaming && this.config.onStreamDelta) {
           response = await this.config.provider.chatStream({
             ...request,
             onDelta: this.config.onStreamDelta,
@@ -313,7 +314,7 @@ export class Agent {
         } else {
           response = await this.config.provider.chatWithRetry(
             request,
-            MAX_API_RETRIES
+            MAX_API_RETRIES,
           );
         }
       } catch (err) {
@@ -323,7 +324,7 @@ export class Agent {
         session.recordAPIFailure(
           this.config.provider.getProviderId(),
           this.config.model,
-          apiDurationMs
+          apiDurationMs,
         );
 
         // Add error to history so conversation can continue
@@ -355,13 +356,13 @@ export class Agent {
           this.config.provider.getProviderId(),
           this.config.model,
           apiDurationMs,
-          response.usage.totalTokens
+          response.usage.totalTokens,
         );
       } else {
         session.recordAPIFailure(
           this.config.provider.getProviderId(),
           this.config.model,
-          apiDurationMs
+          apiDurationMs,
         );
       }
 
@@ -392,10 +393,7 @@ export class Agent {
 
       // ── Check if the model wants to use tools ───────────────────
 
-      if (
-        response.stopReason === "tool_use" &&
-        response.toolCalls.length > 0
-      ) {
+      if (response.stopReason === "tool_use" && response.toolCalls.length > 0) {
         // Add assistant message with tool-use content blocks to history
         this.history.push({
           role: "assistant",
@@ -414,7 +412,7 @@ export class Agent {
             session.recordToolFailure(
               toolResult.name,
               toolResult.durationMs,
-              toolResult.error ?? "Unknown error"
+              toolResult.error ?? "Unknown error",
             );
           }
 
@@ -472,7 +470,7 @@ export class Agent {
       try {
         finalResponse = await this.config.provider.chatWithRetry(
           finalRequest,
-          1
+          1,
         );
 
         const apiDurationMs2 = Date.now() - startMs;
@@ -482,16 +480,17 @@ export class Agent {
             this.config.provider.getProviderId(),
             this.config.model,
             apiDurationMs2,
-            finalResponse.usage.totalTokens
+            finalResponse.usage.totalTokens,
           );
 
           totalUsage = addUsage(totalUsage, finalResponse.usage);
 
           this.history.push({
             role: "assistant",
-            content: finalResponse.contentBlocks.length > 0
-              ? finalResponse.contentBlocks
-              : finalResponse.text || "[Max iterations reached]",
+            content:
+              finalResponse.contentBlocks.length > 0
+                ? finalResponse.contentBlocks
+                : finalResponse.text || "[Max iterations reached]",
           });
         }
       } catch {
@@ -555,7 +554,7 @@ export class Agent {
   async processMessageStreaming(
     userMessage: string,
     onDelta: (text: string) => void,
-    fileContext?: string
+    fileContext?: string,
   ): Promise<AgentResponse> {
     const originalOnDelta = this.config.onStreamDelta;
     const originalStreaming = this.config.streaming;
@@ -708,7 +707,7 @@ export class Agent {
     parts.push("");
     parts.push(
       "Use these tools to explore the codebase and gather context before making assessments. " +
-        "Always examine relevant files before reporting findings."
+        "Always examine relevant files before reporting findings.",
     );
 
     // Add custom suffix
@@ -745,7 +744,7 @@ export class Agent {
         result = await this.config.customToolExecutor(
           name,
           input,
-          this.toolContext
+          this.toolContext,
         );
       } else {
         // Unknown tool
@@ -776,7 +775,7 @@ export class Agent {
     // Audit log
     await appendAuditLog(
       `Tool call: ${name} — ${result.success ? "success" : "failed"} (${durationMs}ms)`,
-      "agent"
+      "agent",
     );
 
     // Build the output content for the model
@@ -835,12 +834,10 @@ export class Agent {
 
     for (const turn of olderTurns) {
       summaryParts.push(`User: ${truncateText(turn.userMessage, 200)}`);
-      summaryParts.push(
-        `Agent: ${truncateText(turn.agentResponse, 300)}`
-      );
+      summaryParts.push(`Agent: ${truncateText(turn.agentResponse, 300)}`);
       if (turn.toolCalls.length > 0) {
         summaryParts.push(
-          `  Tools used: ${turn.toolCalls.map((tc) => tc.name).join(", ")}`
+          `  Tools used: ${turn.toolCalls.map((tc) => tc.name).join(", ")}`,
         );
       }
       summaryParts.push("");
@@ -966,7 +963,7 @@ export function parseTargetMentions(input: string): {
  */
 export async function buildTargetContext(
   targets: string[],
-  projectRoot: string
+  projectRoot: string,
 ): Promise<string> {
   if (targets.length === 0) return "";
 
@@ -982,9 +979,8 @@ export async function buildTargetContext(
       const { resolve: resolvePath } = await import("node:path");
       const absPath = resolvePath(projectRoot, target);
 
-      const { isDirectory: isDirFn, exists: existsFn } = await import(
-        "../utils/fs.js"
-      );
+      const { isDirectory: isDirFn, exists: existsFn } =
+        await import("../utils/fs.js");
 
       const targetExists = await existsFn(absPath);
       if (!targetExists) {
@@ -1010,7 +1006,7 @@ export async function buildTargetContext(
         const file = await scanSingleFile(absPath, projectRoot);
         if (file && file.readOk) {
           parts.push(
-            `=== FILE: ${file.relativePath} (${file.lineCount} lines) ===`
+            `=== FILE: ${file.relativePath} (${file.lineCount} lines) ===`,
           );
           parts.push(file.content);
           parts.push(`=== END FILE ===`);

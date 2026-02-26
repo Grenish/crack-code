@@ -361,7 +361,9 @@ export async function selectOption<T = string>(
 
   const { maxVisible = 10, showNumbers = true } = options;
 
-  writeLine(`  ${cyan(ARROW_RIGHT)} ${bold(question)}`);
+  if (question) {
+    writeLine(`  ${cyan(ARROW_RIGHT)} ${bold(question)}`);
+  }
 
   // If not a TTY or few choices, use numbered fallback
   if (!isTTY()) {

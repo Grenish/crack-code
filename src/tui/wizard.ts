@@ -126,16 +126,26 @@ export interface WizardOptions {
 // ── Banner ──────────────────────────────────────────────────────────────────
 
 const WIZARD_BANNER_LINES = [
+  brightCyan(
+    `_________                       __     _________            .___      `,
+  ),
+  cyan(
+    `\\_   ___ \\____________    ____ |  | __ \\_   ___ \\  ____   __| _/____  `,
+  ),
+  brightGreen(
+    `/    \\  \\/\\_  __ \\__  \\ _/ ___\\|  |/ / /    \\  \\/ /  _ \\ / __ |/ __ \\ `,
+  ),
+  green(
+    `\\     \\____|  | \\// __ \\\\  \\___|    <  \\     \\___(  <_> ) /_/ \\  ___/ `,
+  ),
+  brightCyan(
+    ` \\______  /|__|  (____  /\\___  >__|_ \\  \\______  /\\____/\\____ |\\___  >`,
+  ),
+  cyan(
+    `        \\/            \\/     \\/     \\/         \\/            \\/    \\/ `,
+  ),
   "",
-  `  ${brightCyan("╔══════════════════════════════════════════════════════════════╗")}`,
-  `  ${brightCyan("║")}                                                              ${brightCyan("║")}`,
-  `  ${brightCyan("║")}   ${SHIELD_ICON}  ${bold(brightCyan(APP_NAME))} ${dim("v" + APP_VERSION)}                                  ${brightCyan("║")}`,
-  `  ${brightCyan("║")}   ${dim(APP_DESCRIPTION)}          ${brightCyan("║")}`,
-  `  ${brightCyan("║")}                                                              ${brightCyan("║")}`,
-  `  ${brightCyan("║")}   ${bold(white("First-Run Setup Wizard"))}                                  ${brightCyan("║")}`,
-  `  ${brightCyan("║")}   ${dim("Let's configure your security analysis environment.")}       ${brightCyan("║")}`,
-  `  ${brightCyan("║")}                                                              ${brightCyan("║")}`,
-  `  ${brightCyan("╚══════════════════════════════════════════════════════════════╝")}`,
+  "Let's start with the config first.",
   "",
 ];
 
@@ -151,24 +161,12 @@ function renderStepHeader(
   stepNumber: number,
   totalSteps: number,
   title: string,
-  description: string
-): void {
-  printBlank();
-  printDivider(
-    `${dim(`Step ${stepNumber}/${totalSteps}`)} ${bold(cyan(title))}`,
-    60
-  );
-  printInfo(dim(description));
-  printBlank();
-}
+  description: string,
+): void {}
 
 // ── Section Divider ─────────────────────────────────────────────────────────
 
-function renderSectionComplete(message: string): void {
-  printBlank();
-  printSuccess(message);
-  printBlank();
-}
+function renderSectionComplete(message: string): void {}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Main Wizard Flow
@@ -184,7 +182,7 @@ function renderSectionComplete(message: string): void {
  * @returns The wizard result with the final config.
  */
 export async function runWizard(
-  options: WizardOptions = {}
+  options: WizardOptions = {},
 ): Promise<WizardResult> {
   try {
     await ensureConfigDir();
@@ -221,7 +219,7 @@ export async function runWizard(
       const providerResult = await stepProviderSelection(
         config,
         currentStep,
-        totalSteps
+        totalSteps,
       );
       if (providerResult.cancelled) {
         return {
@@ -330,9 +328,7 @@ function computeTotalSteps(options: WizardOptions): number {
 
   if (
     !options.skipMCP &&
-    (options.section === "mcp" ||
-      options.section === "all" ||
-      !options.section)
+    (options.section === "mcp" || options.section === "all" || !options.section)
   ) {
     steps++;
   }
@@ -347,29 +343,11 @@ function computeTotalSteps(options: WizardOptions): number {
 async function stepPersonalization(
   config: CrackCodeConfig,
   step: number,
-  total: number
+  total: number,
 ): Promise<CrackCodeConfig> {
-  renderStepHeader(
-    step,
-    total,
-    "Personalization",
-    "Set your display name and how the AI introduces itself."
-  );
-
-  // AI Name
-  const aiName = await askQuestion("What should the AI call itself?", {
-    defaultValue: config.display.aiName || APP_NAME,
-    hint: `(default: ${APP_NAME})`,
-    validate: (input: string) => {
-      if (input.length > 50) return "Name must be 50 characters or fewer.";
-      return null;
-    },
-  });
-
   // Host Name
-  const hostName = await askQuestion("What's your name or handle?", {
+  const hostName = await askQuestion("1. What should the AI call you?", {
     defaultValue: config.display.hostName || inferDefaultHostName(),
-    hint: "(shown on the dashboard)",
     validate: (input: string) => {
       if (input.length > 50) return "Name must be 50 characters or fewer.";
       return null;
@@ -377,14 +355,9 @@ async function stepPersonalization(
   });
 
   config = setDisplay(config, {
-    aiName: aiName || APP_NAME,
+    aiName: config.display.aiName || APP_NAME,
     hostName: hostName || "user",
   });
-
-  renderSectionComplete(
-    `Personalization set: AI is ${bold(cyan(config.display.aiName))}, ` +
-      `host is ${bold(cyan(config.display.hostName))}`
-  );
 
   return config;
 }
@@ -393,7 +366,10 @@ async function stepPersonalization(
  * Infer a default host name from environment variables.
  */
 function inferDefaultHostName(): string {
-  const env = typeof process !== "undefined" ? process.env : ({} as Record<string, string | undefined>);
+  const env =
+    typeof process !== "undefined"
+      ? process.env
+      : ({} as Record<string, string | undefined>);
   return (
     env["USER"] ??
     env["USERNAME"] ??
@@ -410,15 +386,8 @@ function inferDefaultHostName(): string {
 async function stepProviderSelection(
   config: CrackCodeConfig,
   step: number,
-  total: number
+  total: number,
 ): Promise<{ config: CrackCodeConfig; cancelled: boolean }> {
-  renderStepHeader(
-    step,
-    total,
-    "AI Provider",
-    "Choose which AI provider to use for security analysis."
-  );
-
   const providers = Object.values(AI_PROVIDER) as AIProvider[];
 
   const choices: SelectChoice<AIProvider | null>[] = providers.map((id) => {
@@ -430,6 +399,13 @@ async function stepProviderSelection(
     let description: string;
     if (isLocal) {
       description = "Local — no API key required, runs on your machine";
+    } else if (id === AI_PROVIDER.VERTEX_AI) {
+      const hasProject = !!(
+        process.env["GOOGLE_CLOUD_PROJECT"] || process.env["GCLOUD_PROJECT"]
+      );
+      description = hasEnvKey
+        ? `Access token detected in ${envKey}${hasProject ? ", project ID detected" : ""}`
+        : "GCP — requires access token, project ID, and region";
     } else if (hasEnvKey) {
       description = `API key detected in ${envKey}`;
     } else {
@@ -444,8 +420,8 @@ async function stepProviderSelection(
   });
 
   const selected = await selectOption<AIProvider | null>(
-    "Select your AI provider:",
-    choices
+    "2. Configure your AI agent.",
+    choices,
   );
 
   if (selected === null) {
@@ -458,11 +434,7 @@ async function stepProviderSelection(
     selected,
     config.provider.apiKey,
     config.provider.defaultModel,
-    ""
-  );
-
-  renderSectionComplete(
-    `Provider selected: ${bold(cyan(AI_PROVIDER_LABELS[selected] ?? selected))}`
+    "",
   );
 
   return { config, cancelled: false };
@@ -475,13 +447,144 @@ async function stepProviderSelection(
 async function stepApiKey(
   config: CrackCodeConfig,
   step: number,
-  total: number
+  total: number,
 ): Promise<{ config: CrackCodeConfig; cancelled: boolean }> {
   const providerId = config.provider.id;
   const providerLabel = AI_PROVIDER_LABELS[providerId] ?? providerId;
   const isOllama = providerId === AI_PROVIDER.OLLAMA;
+  const isVertexAI = providerId === AI_PROVIDER.VERTEX_AI;
   const envKey = AI_PROVIDER_ENV_KEYS[providerId] ?? "";
-  const envValue = envKey ? process.env[envKey] ?? "" : "";
+  const envValue = envKey ? (process.env[envKey] ?? "") : "";
+
+  if (isVertexAI) {
+    // ── Vertex AI: ask for access token, project ID, and region ─────
+    renderStepHeader(
+      step,
+      total,
+      "Vertex AI Configuration",
+      "Configure your Google Cloud project for Vertex AI.\n" +
+        "  You need an access token, a GCP project ID, and a region.",
+    );
+
+    printBlank();
+    printInfo(
+      `${dim("Tip:")} Get an access token with: ${bold(cyan("gcloud auth print-access-token"))}`,
+    );
+    printInfo(
+      `${dim("Tip:")} Ensure the Vertex AI API is enabled in your GCP project.`,
+    );
+    printBlank();
+
+    // ── Region ──────────────────────────────────────────────────────
+    const envRegion = process.env["GOOGLE_CLOUD_REGION"] ?? "";
+    const defaultRegion = envRegion || "us-central1";
+
+    const region = await askQuestion("GCP region:", {
+      defaultValue: defaultRegion,
+      hint: `(default: ${defaultRegion})`,
+      validate: (input: string) => {
+        if (!input || input.length < 3) {
+          return "Please enter a valid GCP region (e.g. us-central1, europe-west1).";
+        }
+        return null;
+      },
+    });
+
+    const effectiveRegion = region || defaultRegion;
+
+    // ── Project ID ──────────────────────────────────────────────────
+    const envProject =
+      process.env["GOOGLE_CLOUD_PROJECT"] ??
+      process.env["GCLOUD_PROJECT"] ??
+      "";
+
+    let projectId: string;
+    if (envProject) {
+      printInfo(
+        `${green(CHECK_MARK)} Project ID detected in environment: ${bold(envProject)}`,
+      );
+      const useEnvProject = await confirm("Use this project ID?", {
+        defaultValue: true,
+      });
+      projectId = useEnvProject ? envProject : "";
+    } else {
+      projectId = "";
+    }
+
+    if (!projectId) {
+      projectId =
+        (await askQuestion("GCP project ID:", {
+          validate: (input: string) => {
+            if (!input || input.length < 3) {
+              return "Please enter your GCP project ID.";
+            }
+            return null;
+          },
+        })) || "";
+    }
+
+    if (!projectId) {
+      printWarning(
+        "No project ID provided. Vertex AI requires a project ID to function." +
+          "\n  Set GOOGLE_CLOUD_PROJECT in your environment or reconfigure via /conf.",
+      );
+    }
+
+    // Build the base URL from region
+    const vertexBaseUrl = `https://${effectiveRegion}-aiplatform.googleapis.com`;
+
+    // ── Access Token ────────────────────────────────────────────────
+    let accessToken = "";
+    if (envValue) {
+      printInfo(
+        `${green(CHECK_MARK)} Access token detected in environment variable ${bold(envKey)}.`,
+      );
+      const useEnv = await confirm("Use the token from the environment?", {
+        defaultValue: true,
+      });
+      if (useEnv) {
+        // Don't store in config — read from env at runtime
+        accessToken = "";
+      } else {
+        accessToken =
+          (await askPassword("3. Enter API Key", {
+            validate: (input: string) => {
+              if (!input || input.length < 10) {
+                return "Access token appears too short. Please check and try again.";
+              }
+              return null;
+            },
+            hint: dim("(input is masked)"),
+          })) || "";
+      }
+    } else {
+      accessToken =
+        (await askPassword("3. Enter API Key", {
+          validate: (input: string) => {
+            if (!input || input.length < 10) {
+              return "Access token appears too short. Run: gcloud auth print-access-token";
+            }
+            return null;
+          },
+          hint: dim("(input is masked)"),
+        })) || "";
+    }
+
+    config = setProvider(
+      config,
+      providerId,
+      accessToken,
+      config.provider.defaultModel,
+      vertexBaseUrl,
+    );
+
+    renderSectionComplete(
+      `Vertex AI configured for project ${bold(cyan(projectId || "(from env)"))} ` +
+        `in ${bold(cyan(effectiveRegion))}`,
+    );
+
+    return { config, cancelled: false };
+  }
 
   if (isOllama) {
     // ── Ollama: ask for server URL ──────────────────────────────────
@@ -489,7 +592,7 @@ async function stepApiKey(
       step,
       total,
       "Ollama Configuration",
-      "Configure the URL of your local Ollama server."
+      "Configure the URL of your local Ollama server.",
     );
 
     const defaultUrl =
@@ -497,40 +600,43 @@ async function stepApiKey(
       AI_PROVIDER_BASE_URLS[AI_PROVIDER.OLLAMA] ||
       "http://localhost:11434";
 
-    const ollamaUrl = await askQuestion("Ollama server URL:", {
-      defaultValue: defaultUrl,
-      hint: `(default: ${defaultUrl})`,
-      validate: (input: string) => {
-        try {
-          new URL(input);
-          return null;
-        } catch {
-          return "Please enter a valid URL (e.g. http://localhost:11434).";
-        }
+    const ollamaUrl = await askQuestion(
+      "3. Enter API Key (For Ollama enter the server url e.g http://localhost:11434)",
+      {
+        defaultValue: defaultUrl,
+        hint: `(default: ${defaultUrl})`,
+        validate: (input: string) => {
+          try {
+            new URL(input);
+            return null;
+          } catch {
+            return "Please enter a valid URL (e.g. http://localhost:11434).";
+          }
+        },
       },
-    });
+    );
 
     config = setProvider(
       config,
       providerId,
       "",
       config.provider.defaultModel,
-      ollamaUrl || defaultUrl
+      ollamaUrl || defaultUrl,
     );
 
     // Test Ollama connectivity
     const reachable = await testOllamaConnection(
-      config.provider.baseUrl || defaultUrl
+      config.provider.baseUrl || defaultUrl,
     );
 
     if (reachable) {
       renderSectionComplete(
-        `Ollama server is reachable at ${bold(cyan(ollamaUrl || defaultUrl))}`
+        `Ollama server is reachable at ${bold(cyan(ollamaUrl || defaultUrl))}`,
       );
     } else {
       printWarning(
         `Could not reach Ollama at ${ollamaUrl || defaultUrl}. ` +
-          "Make sure Ollama is running and the URL is correct."
+          "Make sure Ollama is running and the URL is correct.",
       );
       printInfo(dim("You can continue anyway and fix this later via /conf."));
       printBlank();
@@ -545,13 +651,13 @@ async function stepApiKey(
     step,
     total,
     `${providerLabel} API Key`,
-    `Enter your API key for ${providerLabel}. The key is stored locally and never sent anywhere except to ${providerLabel}'s API.`
+    `Enter your API key for ${providerLabel}. The key is stored locally and never sent anywhere except to ${providerLabel}'s API.`,
   );
 
   // Check if key is already in the environment
   if (envValue) {
     printInfo(
-      `${green(CHECK_MARK)} API key detected in environment variable ${bold(envKey)}.`
+      `${green(CHECK_MARK)} API key detected in environment variable ${bold(envKey)}.`,
     );
 
     const useEnv = await confirm("Use the key from the environment?", {
@@ -564,18 +670,18 @@ async function stepApiKey(
         providerId,
         "", // Don't store in config — read from env at runtime
         config.provider.defaultModel,
-        config.provider.baseUrl
+        config.provider.baseUrl,
       );
 
       renderSectionComplete(
-        `Using ${providerLabel} API key from ${bold(envKey)}`
+        `Using ${providerLabel} API key from ${bold(envKey)}`,
       );
       return { config, cancelled: false };
     }
   }
 
   // Prompt for API key
-  const apiKey = await askPassword(`Enter your ${providerLabel} API key:`, {
+  const apiKey = await askPassword(`3. Enter API Key`, {
     validate: (input: string) => {
       if (!input || input.length < 8) {
         return "API key appears too short. Please check and try again.";
@@ -595,7 +701,7 @@ async function stepApiKey(
     providerId,
     apiKey,
     config.provider.defaultModel,
-    config.provider.baseUrl
+    config.provider.baseUrl,
   );
 
   // Validate the key
@@ -603,13 +709,11 @@ async function stepApiKey(
 
   if (keyValid) {
     const masked = getMaskedApiKey(config);
-    renderSectionComplete(
-      `${providerLabel} API key verified: ${dim(masked)}`
-    );
+    renderSectionComplete(`${providerLabel} API key verified: ${dim(masked)}`);
   } else {
     printWarning(
       `Could not verify the API key with ${providerLabel}. ` +
-        "The key may be invalid, or there may be a network issue."
+        "The key may be invalid, or there may be a network issue.",
     );
     printInfo(dim("You can continue anyway and fix this later via /conf."));
     printBlank();
@@ -623,22 +727,25 @@ async function stepApiKey(
  */
 async function testOllamaConnection(baseUrl: string): Promise<boolean> {
   try {
-    const result = await withSpinner("Testing Ollama connection...", async () => {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
+    const result = await withSpinner(
+      "Testing Ollama connection...",
+      async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
 
-      try {
-        const response = await fetch(`${baseUrl}/api/tags`, {
-          method: "GET",
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        return response.ok;
-      } catch {
-        clearTimeout(timeout);
-        return false;
-      }
-    });
+        try {
+          const response = await fetch(`${baseUrl}/api/tags`, {
+            method: "GET",
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+          return response.ok;
+        } catch {
+          clearTimeout(timeout);
+          return false;
+        }
+      },
+    );
     return result;
   } catch {
     return false;
@@ -649,15 +756,14 @@ async function testOllamaConnection(baseUrl: string): Promise<boolean> {
  * Validate API key by attempting a connection to the provider.
  */
 async function validateApiKeyConnection(
-  config: CrackCodeConfig
+  config: CrackCodeConfig,
 ): Promise<boolean> {
   try {
     const result = await withSpinner(
       `Verifying ${getProviderLabel(config)} API key...`,
       async () => {
-        const { validateProviderConnection } = await import(
-          "../providers/model-fetcher.js"
-        );
+        const { validateProviderConnection } =
+          await import("../providers/model-fetcher.js");
 
         const apiKey = getEffectiveApiKey(config);
         const baseUrl = getEffectiveBaseUrl(config);
@@ -665,11 +771,11 @@ async function validateApiKeyConnection(
         const validation = await validateProviderConnection(
           config.provider.id,
           apiKey,
-          baseUrl
+          baseUrl,
         );
 
         return validation.valid;
-      }
+      },
     );
     return result;
   } catch {
@@ -684,16 +790,13 @@ async function validateApiKeyConnection(
 async function stepModelSelection(
   config: CrackCodeConfig,
   step: number,
-  total: number
+  total: number,
 ): Promise<CrackCodeConfig> {
   const providerLabel = getProviderLabel(config);
 
-  renderStepHeader(
-    step,
-    total,
-    "Model Selection",
-    `Fetching available models from ${providerLabel}... ` +
-      "We'll filter for models that support tool/function calling."
+  printInfo("4. Select the default model");
+  printInfo(
+    "   These are the models from the API key what suports tool calling and might work with Crack Code.",
   );
 
   // Fetch models from the provider
@@ -711,7 +814,7 @@ async function stepModelSelection(
 
         const result = await fetchModels(config.provider.id, apiKey, baseUrl);
         return result;
-      }
+      },
     );
 
     if (models.ok) {
@@ -726,9 +829,8 @@ async function stepModelSelection(
           "No models were returned by the provider. " +
           "You can enter a model ID manually.";
       } else {
-        const { formatModelChoices } = await import(
-          "../providers/model-fetcher.js"
-        );
+        const { formatModelChoices } =
+          await import("../providers/model-fetcher.js");
 
         modelChoices = formatModelChoices(displayModels).map((choice) => ({
           value: choice.value,
@@ -739,7 +841,7 @@ async function stepModelSelection(
           `Found ${bold(String(displayModels.length))} model${displayModels.length !== 1 ? "s" : ""} ` +
             (models.toolCallingModels.length > 0
               ? `(${models.toolCallingModels.length} with tool calling)`
-              : "(tool-calling detection not available for this provider)")
+              : "(tool-calling detection not available for this provider)"),
         );
         printBlank();
       }
@@ -769,7 +871,7 @@ async function stepModelSelection(
     const selected = await selectOption<string>(
       "Select your default model:",
       modelChoices,
-      { maxVisible: 12 }
+      { maxVisible: 12 },
     );
 
     if (selected && selected !== "__manual__") {
@@ -797,12 +899,10 @@ async function stepModelSelection(
       config.provider.id,
       config.provider.apiKey,
       selectedModel,
-      config.provider.baseUrl
+      config.provider.baseUrl,
     );
 
-    renderSectionComplete(
-      `Default model: ${bold(cyan(selectedModel))}`
-    );
+    renderSectionComplete(`Default model: ${bold(cyan(selectedModel))}`);
   } else {
     printWarning("No model selected. You can set one later via /conf.");
     printBlank();
@@ -818,33 +918,18 @@ async function stepModelSelection(
 async function stepMCPSetup(
   config: CrackCodeConfig,
   step: number,
-  total: number
+  total: number,
 ): Promise<CrackCodeConfig> {
-  renderStepHeader(
-    step,
-    total,
-    "Web Search (MCP)",
-    "Optionally enable web search for CVE lookups, advisory checks, and " +
-      "best-practice documentation. Uses the Model Context Protocol (MCP)."
-  );
-
-  printInfo(
-    dim(
-      "Context7 MCP is always available (no API key needed) for documentation lookups."
-    )
-  );
-  printBlank();
-
-  const enableSearch = await confirm(
-    "Enable an additional web search provider?",
-    { defaultValue: false }
-  );
+  const enableSearch = await confirm("5. Do you want the web search?", {
+    defaultValue: false,
+  });
 
   if (!enableSearch) {
     config = setMCP(config, false, null, "");
-    renderSectionComplete("Web search: using Context7 only (no extra search provider).");
     return config;
   }
+
+  printInfo("   You can configure it later as well.");
 
   // Select web search provider
   const searchChoices: SelectChoice<string>[] = WEB_SEARCH_CHOICES.map(
@@ -855,17 +940,14 @@ async function stepMCPSetup(
         choice.value === "skip"
           ? undefined
           : (MCP_PROVIDERS_REQUIRING_KEY as readonly string[]).includes(
-                choice.value
+                choice.value,
               )
             ? `Requires API key (env: ${MCP_PROVIDER_ENV_KEYS[choice.value] ?? "N/A"})`
             : "No API key required",
-    })
+    }),
   );
 
-  const selectedSearch = await selectOption<string>(
-    "Select a web search provider:",
-    searchChoices
-  );
+  const selectedSearch = await selectOption<string>("", searchChoices);
 
   if (!selectedSearch || selectedSearch === "skip") {
     config = setMCP(config, false, null, "");
@@ -874,19 +956,19 @@ async function stepMCPSetup(
   }
 
   const mcpProvider = selectedSearch as MCPProvider;
-  const requiresKey = (MCP_PROVIDERS_REQUIRING_KEY as readonly string[]).includes(
-    mcpProvider
-  );
+  const requiresKey = (
+    MCP_PROVIDERS_REQUIRING_KEY as readonly string[]
+  ).includes(mcpProvider);
 
   let mcpApiKey = "";
 
   if (requiresKey) {
     const envKeyName = MCP_PROVIDER_ENV_KEYS[mcpProvider];
-    const envValue = envKeyName ? process.env[envKeyName] ?? "" : "";
+    const envValue = envKeyName ? (process.env[envKeyName] ?? "") : "";
 
     if (envValue) {
       printInfo(
-        `${green(CHECK_MARK)} API key detected in ${bold(envKeyName ?? "environment")}.`
+        `${green(CHECK_MARK)} API key detected in ${bold(envKeyName ?? "environment")}.`,
       );
 
       const useEnv = await confirm("Use the key from the environment?", {
@@ -895,37 +977,32 @@ async function stepMCPSetup(
 
       if (!useEnv) {
         mcpApiKey = await askPassword(
-          `Enter your ${MCP_PROVIDER_LABELS[mcpProvider] ?? mcpProvider} API key:`,
+          `Enter the API Key for ${MCP_PROVIDER_LABELS[mcpProvider] ?? mcpProvider}`,
           {
             hint: dim("(input is masked)"),
-          }
+          },
         );
       }
       // If using env, leave mcpApiKey empty — read at runtime
     } else {
       mcpApiKey = await askPassword(
-        `Enter your ${MCP_PROVIDER_LABELS[mcpProvider] ?? mcpProvider} API key:`,
+        `Enter the API Key for ${MCP_PROVIDER_LABELS[mcpProvider] ?? mcpProvider}`,
         {
           hint: dim("(input is masked)"),
           allowEmpty: true,
-        }
+        },
       );
 
       if (!mcpApiKey) {
         printWarning(
           `No API key provided for ${MCP_PROVIDER_LABELS[mcpProvider] ?? mcpProvider}. ` +
-            "Web search will not work without it."
+            "Web search will not work without it.",
         );
       }
     }
   }
 
   config = setMCP(config, true, mcpProvider, mcpApiKey);
-
-  const mcpLabel = MCP_PROVIDER_LABELS[mcpProvider] ?? mcpProvider;
-  renderSectionComplete(
-    `Web search enabled: ${bold(cyan(mcpLabel))} + Context7`
-  );
 
   return config;
 }
@@ -935,34 +1012,36 @@ async function stepMCPSetup(
 // ═════════════════════════════════════════════════════════════════════════════
 
 function renderWizardComplete(config: CrackCodeConfig): void {
+  printInfo("6. Setting up...");
+
   const summary = getConfigSummary(config);
   const validation = validateConfig(config);
 
   printBlank();
   process.stdout.write(
     brightCyan(
-      "  ╔══════════════════════════════════════════════════════════════╗\n"
-    )
+      "  ╔══════════════════════════════════════════════════════════════╗\n",
+    ),
   );
   process.stdout.write(
     brightCyan("  ║") +
       "                                                              " +
-      brightCyan("║\n")
+      brightCyan("║\n"),
   );
   process.stdout.write(
     brightCyan("  ║") +
       `   ${green(CHECK_MARK)} ${bold(green("Setup Complete!"))}                                        ` +
-      brightCyan("║\n")
+      brightCyan("║\n"),
   );
   process.stdout.write(
     brightCyan("  ║") +
       "                                                              " +
-      brightCyan("║\n")
+      brightCyan("║\n"),
   );
   process.stdout.write(
     brightCyan(
-      "  ╚══════════════════════════════════════════════════════════════╝\n"
-    )
+      "  ╚══════════════════════════════════════════════════════════════╝\n",
+    ),
   );
   printBlank();
 
@@ -981,12 +1060,15 @@ function renderWizardComplete(config: CrackCodeConfig): void {
   kvLine("Host Name:", summary.hostName);
   kvLine("Provider:", summary.providerLabel);
   kvLine("Model:", summary.model);
-  kvLine("API Key:", summary.apiKeySet ? green("configured") : yellow("not set"));
+  kvLine(
+    "API Key:",
+    summary.apiKeySet ? green("configured") : yellow("not set"),
+  );
   kvLine(
     "Web Search:",
     summary.mcpEnabled
       ? `${green("enabled")} (${summary.mcpProvider ?? "context7"})`
-      : dim("Context7 only")
+      : dim("Context7 only"),
   );
   kvLine("HUD:", summary.hudEnabled ? green("enabled") : dim("disabled"));
 
@@ -1011,16 +1093,16 @@ function renderWizardComplete(config: CrackCodeConfig): void {
   printDivider("Getting Started", 55);
   printBlank();
   process.stdout.write(
-    `  ${dim("Type a message to start analyzing your code's security.")}\n`
+    `  ${dim("Type a message to start analyzing your code's security.")}\n`,
   );
   process.stdout.write(
-    `  ${dim("Use")} ${cyan("@path/to/file")} ${dim("to target specific files.")}\n`
+    `  ${dim("Use")} ${cyan("@path/to/file")} ${dim("to target specific files.")}\n`,
   );
   process.stdout.write(
-    `  ${dim("Use")} ${cyan("/help")} ${dim("to see all available commands.")}\n`
+    `  ${dim("Use")} ${cyan("/help")} ${dim("to see all available commands.")}\n`,
   );
   process.stdout.write(
-    `  ${dim("Use")} ${cyan("/conf")} ${dim("to change settings at any time.")}\n`
+    `  ${dim("Use")} ${cyan("/conf")} ${dim("to change settings at any time.")}\n`,
   );
   printBlank();
 }
@@ -1055,13 +1137,16 @@ export async function runConfigEditor(): Promise<WizardResult> {
   kvLine("Host Name:", summary.hostName);
   kvLine("Provider:", summary.providerLabel);
   kvLine("Model:", summary.model);
-  kvLine("API Key:", summary.apiKeySet ? green("configured") : yellow("not set"));
+  kvLine(
+    "API Key:",
+    summary.apiKeySet ? green("configured") : yellow("not set"),
+  );
   kvLine("Base URL:", summary.baseUrl || dim("(default)"));
   kvLine(
     "MCP:",
     summary.mcpEnabled
       ? `${green("enabled")} (${summary.mcpProvider ?? "context7"})`
-      : dim("Context7 only")
+      : dim("Context7 only"),
   );
   printBlank();
 
@@ -1106,7 +1191,7 @@ export async function runConfigEditor(): Promise<WizardResult> {
 
   const selected = await selectOption<string>(
     "What would you like to change?",
-    choices
+    choices,
   );
 
   if (!selected || selected === "cancel") {
@@ -1124,7 +1209,7 @@ export async function runConfigEditor(): Promise<WizardResult> {
     });
     await saveConfig(updatedConfig);
     printSuccess(
-      `Dashboard HUD ${updatedConfig.display.hudEnabled ? green("enabled") : dim("disabled")}.`
+      `Dashboard HUD ${updatedConfig.display.hudEnabled ? green("enabled") : dim("disabled")}.`,
     );
     return {
       completed: true,
@@ -1137,7 +1222,7 @@ export async function runConfigEditor(): Promise<WizardResult> {
   if (selected === "reset") {
     const confirmReset = await confirm(
       "Are you sure you want to reset ALL configuration?",
-      { defaultValue: false }
+      { defaultValue: false },
     );
 
     if (confirmReset) {
@@ -1215,14 +1300,12 @@ export async function ensureWizardCompleted(): Promise<CrackCodeConfig> {
  * Prompts for a new API key without running the full wizard.
  */
 export async function promptForApiKey(
-  config: CrackCodeConfig
+  config: CrackCodeConfig,
 ): Promise<CrackCodeConfig> {
   const providerLabel = getProviderLabel(config);
 
   printBlank();
-  printWarning(
-    `${providerLabel} API key is missing or invalid.`
-  );
+  printWarning(`${providerLabel} API key is missing or invalid.`);
   printBlank();
 
   if (config.provider.id === AI_PROVIDER.OLLAMA) {
@@ -1235,16 +1318,15 @@ export async function promptForApiKey(
       config.provider.id,
       "",
       config.provider.defaultModel,
-      url
+      url,
     );
     await saveConfig(updated);
     return updated;
   }
 
-  const apiKey = await askPassword(
-    `Enter your ${providerLabel} API key:`,
-    { hint: dim("(input is masked)") }
-  );
+  const apiKey = await askPassword(`Enter your ${providerLabel} API key:`, {
+    hint: dim("(input is masked)"),
+  });
 
   if (!apiKey) {
     printWarning("No API key provided.");
@@ -1256,7 +1338,7 @@ export async function promptForApiKey(
     config.provider.id,
     apiKey,
     config.provider.defaultModel,
-    config.provider.baseUrl
+    config.provider.baseUrl,
   );
   await saveConfig(updated);
 
@@ -1271,7 +1353,7 @@ export async function promptForApiKey(
  * Fetches models and lets the user pick without running the full wizard.
  */
 export async function promptForModel(
-  config: CrackCodeConfig
+  config: CrackCodeConfig,
 ): Promise<CrackCodeConfig> {
   const updated = await stepModelSelection(config, 1, 1);
   await saveConfig(updated);

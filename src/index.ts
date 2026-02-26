@@ -21,6 +21,7 @@ import {
   type Interface as ReadlineInterface,
 } from "node:readline";
 import { resolve, basename } from "node:path";
+import { readdirSync, statSync } from "node:fs";
 
 // ── Utils ───────────────────────────────────────────────────────────────────
 
@@ -35,12 +36,16 @@ import {
   brightCyan,
   brightGreen,
   magenta,
+  stripAnsi,
   SHIELD_ICON,
   CHECK_MARK,
   CROSS_MARK,
   WARNING_MARK,
   GEAR_ICON,
   SEARCH_ICON,
+  setIconMode,
+  getIconMode,
+  type IconMode,
 } from "./utils/colors.js";
 
 import {
@@ -56,6 +61,7 @@ import {
 import {
   type CrackCodeConfig,
   saveConfig,
+  setDisplay,
   getEffectiveApiKey,
   getEffectiveBaseUrl,
   getProviderLabel,
@@ -131,12 +137,16 @@ import {
   formatFullReport,
   formatAgentResponse,
   formatAgentError,
-  formatToolCallStart,
-  formatToolCallResult,
-  formatThinkingIndicator,
   formatNoFindings,
+  formatToolCallCompact,
+  formatToolResultCompact,
+  formatThinkingSpinner,
+  formatProgressIndicator,
   type ScanSummaryInput,
-} from "./output/formatter.js";
+} from "./output/formatter";
+import { StreamRenderer } from "./output/stream-renderer";
+
+let currentStreamRenderer: StreamRenderer | null = null;
 
 import {
   countBySeverity,
@@ -164,118 +174,187 @@ const CRACK_CODE_BANNER = [
 
 function renderBannerString(): string {
   const lines: string[] = [];
-
-  // Gradient colors across banner lines
   const colors = [brightCyan, cyan, brightGreen, green, brightCyan, cyan];
-
   for (let i = 0; i < CRACK_CODE_BANNER.length; i++) {
     const colorFn = colors[i % colors.length]!;
     lines.push(colorFn(CRACK_CODE_BANNER[i]!));
   }
-
   return lines.join("\n");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Startup Dashboard (matches ui.md "After Config" spec)
+// Path Helper
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** Shorten an absolute path by replacing $HOME with ~ */
+function shortenPath(p: string): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"] || "";
+  if (home && p.startsWith(home)) {
+    return "~" + p.slice(home.length);
+  }
+  return p;
+}
+
+/** Get terminal width, clamped */
+function getTermWidth(): number {
+  return Math.max(40, (process.stdout as NodeJS.WriteStream).columns || 80);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Startup Dashboard (ui.md Fig. 2)
 // ═════════════════════════════════════════════════════════════════════════════
 
 function renderStartupDashboard(
   config: CrackCodeConfig,
   targetPath: string,
   git: GitStatus,
-  hudEnabled: boolean,
+  modelName: string,
 ): string {
   const lines: string[] = [];
+  const width = getTermWidth();
 
-  // Clear screen
+  // Clear screen + home
   lines.push("\x1B[2J\x1B[H");
-  lines.push("");
 
-  // ASCII art banner
+  // ── Banner ─────────────────────────────────────────────────────────
   lines.push(renderBannerString());
-  lines.push("");
 
-  // ── Meta info ──────────────────────────────────────────────────────
+  // ── Meta info block (aligned labels) ───────────────────────────────
+  //    version: 0.1.0
+  //      Host: grenishrai
+  //      Repo: /home/grenishrai/Desktop/apps/crack-code
+  //       Git: True ( main )
   const hostName = config.display.hostName || "User";
-
-  // Version
-  lines.push(` ${dim("version:")} ${white(APP_VERSION)}`);
-
-  // Host
-  lines.push(` ${dim("Host:")} ${brightCyan(hostName)}`);
-
-  // Repo — warn if running from home directory
   const homeDir = process.env["HOME"] || process.env["USERPROFILE"] || "~";
   const isHomeDir = targetPath === homeDir || targetPath === homeDir + "/";
+
+  lines.push(`${dim("version:")} ${white(APP_VERSION)}`);
+  lines.push(`${dim(" Host:")} ${brightCyan(hostName)}`);
   if (isHomeDir) {
     lines.push(
-      ` ${dim("Repo:")} ${yellow(`${WARNING_MARK} Warning: running in home directory`)}`,
+      `${dim(" Repo:")} ${yellow(` Warning: running in home directory`)}`,
     );
   } else {
-    lines.push(` ${dim("Repo:")} ${cyan(targetPath)}`);
+    lines.push(`${dim(" Repo:")} ${cyan(targetPath)}`);
   }
-
-  // Git
   if (git.isRepo) {
     lines.push(
-      ` ${dim("Git Enabled:")} ${green("True")} ${dim("(")} ${magenta(git.branch)} ${dim(")")}`,
+      `${dim(" Git Enabled :")} ${green("True")} ${dim("(")} ${magenta(git.branch)}${dim(")")}`,
     );
   } else {
-    lines.push(` ${dim("Git Enabled:")} ${dim("False")}`);
+    lines.push(`${dim(" Git Enabled :")} ${dim("False")}`);
   }
 
-  // ── Tips (only when HUD is enabled) ────────────────────────────────
-  if (hudEnabled) {
-    lines.push("");
-    lines.push(` ${bold("Tips for getting started:")}`);
-    lines.push(
-      ` ${dim("1.")} type ${cyan("/help")} to list out the available commands.`,
-    );
-    lines.push(
-      ` ${dim("2.")} type ${cyan("/conf")} to configure the AI model and API Keys.`,
-    );
-    lines.push(` ${dim("3.")} type ${cyan("@")} to select the file or folder.`);
-    lines.push(
-      ` ${dim("4.")} type ${cyan("/tools")} to list out the available tools.`,
-    );
-    lines.push(
-      ` ${dim("5.")} type ${cyan("/mcp")} to configure the mcp server.`,
-    );
-    lines.push(
-      ` ${dim("6.")} type ${cyan("/hud")} to hide/show this tips from next time.`,
-    );
-  }
-
-  // Tagline
-  lines.push(` ${brightGreen("Happy Crack Code")} ${SHIELD_ICON}`);
   lines.push("");
 
-  return lines.join("\n");
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Welcome Greeting (matches ui.md spec)
-// ═════════════════════════════════════════════════════════════════════════════
-
-function renderWelcomeGreeting(config: CrackCodeConfig): string {
+  // ── Welcome greeting ───────────────────────────────────────────────
   const name = config.display.hostName || "there";
-  const lines: string[] = [];
-
-  lines.push(
-    ` ${bold("Hello")} ${bold(brightCyan(name))}${bold(", what are we cracking today?")}`,
-  );
+  lines.push(`Hello ${brightCyan(name)}, what are we cracking today?`);
   lines.push("");
+
+  // ── Context bar (shown once) ───────────────────────────────────────
+  //    ~/Desktop/apps/crack-code (  main )              gemini-3-flash-preview
+  //    -----------------------------------------------------------------------------
+  const displayPath = shortenPath(targetPath);
+  const leftPart = git.isRepo
+    ? `${cyan(displayPath)} ${dim("(")} ${magenta(git.branch)}${dim(")")}`
+    : cyan(displayPath);
+  const rightPart = modelName ? dim(modelName) : dim("no model");
+  const leftLen = stripAnsi(leftPart).length;
+  const rightLen = stripAnsi(rightPart).length;
+  const gap = Math.max(2, width - leftLen - rightLen);
+  lines.push(leftPart + " ".repeat(gap) + rightPart);
+  lines.push(dim("-".repeat(width)));
 
   return lines.join("\n");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// REPL Prompt (matches ui.md spec)
+// REPL Prompt
 // ═════════════════════════════════════════════════════════════════════════════
 
+/** The simple `> ` prompt shown on each REPL iteration */
 function getCrackPrompt(): string {
-  return `${SHIELD_ICON} ${dim(">")} `;
+  return `${dim("❯")} `;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Tab-Completion for @ mentions and / commands
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** Command names + descriptions for / completion hints */
+const COMMAND_LIST: Array<[string, string]> = [
+  ["/help", "Show all commands"],
+  ["/scan", "Run a full security scan"],
+  ["/conf", "Edit configuration"],
+  ["/tools", "List available tools"],
+  ["/mcp", "Manage MCP servers"],
+  ["/hud", "Toggle dashboard HUD"],
+  ["/icons", "Switch icon mode"],
+  ["/report", "View last scan report"],
+  ["/status", "Session & provider status"],
+  ["/clear", "Clear the screen"],
+  ["/exit", "Exit Crack Code"],
+  ["/quit", "Exit Crack Code"],
+];
+
+/**
+ * Build a readline completer function that handles:
+ *   - `/` prefix → slash-command completion
+ *   - `@` prefix → file/directory completion relative to projectRoot
+ */
+function buildCompleter(
+  projectRoot: string,
+): (line: string) => [string[], string] {
+  return (line: string): [string[], string] => {
+    // Find the current token (last whitespace-delimited word)
+    const tokens = line.split(/\s+/);
+    const current = tokens[tokens.length - 1] || "";
+
+    // ── / command completion ──────────────────────────────────────
+    if (current.startsWith("/")) {
+      const matches = COMMAND_LIST.filter(([cmd]) =>
+        cmd.startsWith(current.toLowerCase()),
+      ).map(([cmd]) => cmd);
+      return [
+        matches.length > 0 ? matches : COMMAND_LIST.map(([c]) => c),
+        current,
+      ];
+    }
+
+    // ── @ file/directory completion ───────────────────────────────
+    if (current.startsWith("@")) {
+      const partial = current.slice(1); // strip leading @
+      const lastSlash = partial.lastIndexOf("/");
+      const dirPart = lastSlash >= 0 ? partial.slice(0, lastSlash + 1) : "";
+      const filePart = lastSlash >= 0 ? partial.slice(lastSlash + 1) : partial;
+
+      const searchDir = resolve(projectRoot, dirPart || ".");
+      try {
+        const entries = readdirSync(searchDir);
+        const matches: string[] = [];
+        for (const entry of entries) {
+          // Skip hidden files and common noise
+          if (entry.startsWith(".") || entry === "node_modules") continue;
+          if (!entry.toLowerCase().startsWith(filePart.toLowerCase())) continue;
+
+          try {
+            const st = statSync(resolve(searchDir, entry));
+            const suffix = st.isDirectory() ? "/" : "";
+            matches.push("@" + dirPart + entry + suffix);
+          } catch {
+            matches.push("@" + dirPart + entry);
+          }
+        }
+        return [matches, current];
+      } catch {
+        return [[], current];
+      }
+    }
+
+    // No special completion
+    return [[], current];
+  };
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -345,6 +424,8 @@ interface AppState {
   dashboardInfo: DashboardInfo;
   hudEnabled: boolean;
   targetPath: string;
+  /** Cached git status — refreshed only on /clear or /conf */
+  cachedGit: GitStatus;
   lastScanResult: ScanResult | null;
   lastAnalysisResult: AnalysisResult | null;
   mcpClients: Map<string, MCPClient>;
@@ -370,6 +451,8 @@ async function main(): Promise<void> {
 
   // ── 2. First-Run Wizard ─────────────────────────────────────────────
   let config: CrackCodeConfig;
+
+  // NOTE: setIconMode() is called below after config is loaded (step 3b).
   try {
     config = await ensureWizardCompleted();
   } catch (err) {
@@ -381,6 +464,9 @@ async function main(): Promise<void> {
 
   // ── 3. Create Session ──────────────────────────────────────────────
   const session = createSession();
+
+  // ── 3b. Apply icon mode from config ────────────────────────────
+  setIconMode(config.display.iconMode);
 
   // ── 4. Determine Target Path ────────────────────────────────────────
   const targetArg = process.argv.slice(2).find((a) => !a.startsWith("-"));
@@ -449,24 +535,39 @@ async function main(): Promise<void> {
         streaming: true,
         onStreamDelta: (delta: StreamDelta) => {
           if (delta.text) {
-            process.stdout.write(delta.text);
+            if (!currentStreamRenderer) {
+              currentStreamRenderer = new StreamRenderer();
+            }
+            currentStreamRenderer.append(delta.text);
           }
         },
         onToolCallStart: (toolName, input) => {
-          process.stdout.write(formatToolCallStart(toolName, input) + "\n");
+          if (currentStreamRenderer) {
+            currentStreamRenderer.end();
+            currentStreamRenderer = null;
+          }
+          process.stdout.write(
+            "\n" + formatToolCallCompact(toolName, input) + "\n",
+          );
         },
         onToolCallEnd: (toolName, result, durationMs) => {
           process.stdout.write(
-            formatToolCallResult(
+            formatToolResultCompact(
               toolName,
               result.success,
               durationMs,
-              result.content.slice(0, 120),
+              result.content,
             ) + "\n",
           );
         },
         onThinking: (phase) => {
-          process.stdout.write(formatThinkingIndicator(phase) + "\n");
+          if (currentStreamRenderer) {
+            currentStreamRenderer.end();
+            currentStreamRenderer = null;
+          }
+          process.stdout.write(
+            formatThinkingSpinner(0, phase || "Thinking...") + "\n",
+          );
         },
       };
       agent = createAgent(agentConfig);
@@ -499,7 +600,16 @@ async function main(): Promise<void> {
     dashboardInfo = updateDashboardMCP(dashboardInfo, mcpClients.size > 0);
   }
 
-  // ── 9. Build App State ─────────────────────────────────────────────
+  // ── 9. Detect Git (cached for the session) ─────────────────────────
+  const cachedGit = detectGitStatus(targetPath);
+
+  // ── 10. Resolve model name for display ─────────────────────────────
+  const displayModelName =
+    config.provider.defaultModel ||
+    (provider ? provider.getSelectedModel() : "") ||
+    "";
+
+  // ── 11. Build App State ────────────────────────────────────────────
   const state: AppState = {
     config,
     provider,
@@ -507,6 +617,7 @@ async function main(): Promise<void> {
     dashboardInfo,
     hudEnabled: config.display.hudEnabled,
     targetPath,
+    cachedGit,
     lastScanResult: null,
     lastAnalysisResult: null,
     mcpClients,
@@ -514,10 +625,9 @@ async function main(): Promise<void> {
     running: true,
   };
 
-  // ── 10. Install Exit Handler ───────────────────────────────────────
+  // ── 12. Install Exit Handler ───────────────────────────────────────
   session.installExitHandler(() => {
     state.running = false;
-    // Cleanup MCP clients
     for (const [, client] of state.mcpClients) {
       try {
         client.disconnect();
@@ -528,12 +638,10 @@ async function main(): Promise<void> {
     process.exit(EXIT_CODES.SUCCESS);
   });
 
-  // ── 11. Show Dashboard & Welcome ───────────────────────────────────
-  const git = detectGitStatus(targetPath);
+  // ── 13. Show Dashboard ─────────────────────────────────────────────
   process.stdout.write(
-    renderStartupDashboard(config, targetPath, git, state.hudEnabled),
+    renderStartupDashboard(config, targetPath, cachedGit, displayModelName),
   );
-  process.stdout.write(renderWelcomeGreeting(config));
 
   // ── 12. Start REPL ─────────────────────────────────────────────────
   await startREPL(state);
@@ -544,11 +652,36 @@ async function main(): Promise<void> {
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function startREPL(state: AppState): Promise<void> {
+  const completer = buildCompleter(state.targetPath);
+
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal: process.stdin.isTTY ?? false,
+    completer,
   });
+
+  rl.on("SIGINT", () => {
+    process.emit("SIGINT");
+  });
+
+  rl.on("close", () => {
+    getSession().exit();
+  });
+
+  // Show the hint once before the first prompt
+  process.stdout.write(
+    dim("> Type ") +
+      cyan("@") +
+      dim(" to mention files, ") +
+      cyan("/") +
+      dim(" for commands, or ") +
+      cyan("/help") +
+      dim(" for help") +
+      "\n" +
+      dim("-".repeat(getTermWidth())) +
+      "\n",
+  );
 
   const promptForInput = (): Promise<string> => {
     return new Promise((resolve) => {
@@ -565,11 +698,9 @@ async function startREPL(state: AppState): Promise<void> {
     try {
       input = await promptForInput();
     } catch {
-      // stdin closed or readline error — exit gracefully
       break;
     }
 
-    // Skip empty input
     if (!input) continue;
 
     // ── Handle Slash Commands ──────────────────────────────────────
@@ -594,6 +725,51 @@ async function startREPL(state: AppState): Promise<void> {
 // Command Dispatcher
 // ═════════════════════════════════════════════════════════════════════════════
 
+// ── /icons ──────────────────────────────────────────────────────────────────
+
+async function handleIconsCommand(state: AppState): Promise<void> {
+  const current = getIconMode();
+
+  const choices: SelectChoice<IconMode>[] = [
+    {
+      value: "nerd" as IconMode,
+      label: `Nerd Font glyphs${current === "nerd" ? dim(" (current)") : ""}`,
+    },
+    {
+      value: "unicode" as IconMode,
+      label: `Unicode symbols (✔ ✖ ⚙ →)${current === "unicode" ? dim(" (current)") : ""}`,
+    },
+    {
+      value: "ascii" as IconMode,
+      label: `ASCII fallbacks ([ok] [x] [gear] ->)${current === "ascii" ? dim(" (current)") : ""}`,
+    },
+  ];
+
+  const selected = await selectOption<IconMode>(
+    "Select icon rendering mode:",
+    choices,
+  );
+
+  if (!selected || selected === current) {
+    printInfo(`Icon mode unchanged: ${cyan(current)}`);
+    return;
+  }
+
+  setIconMode(selected);
+
+  // Persist the choice in the config
+  state.config = setDisplay(state.config, { iconMode: selected });
+  await saveConfig(state.config);
+
+  printSuccess(`Icon mode set to ${cyan(selected)}.`);
+  if (selected === "nerd") {
+    printInfo(
+      `Nerd Font glyphs require a patched terminal font. See ${cyan("/help")} or the README for setup instructions.`,
+    );
+  }
+}
+
+// ── Command Dispatcher ──────────────────────────────────────────────────────
 async function handleCommand(
   input: string,
   state: AppState,
@@ -612,13 +788,18 @@ async function handleCommand(
       return true;
 
     case COMMANDS.CLEAR: {
-      const gitInfo = detectGitStatus(state.targetPath);
+      // Refresh git cache on clear
+      state.cachedGit = detectGitStatus(state.targetPath);
+      const modelName =
+        state.config.provider.defaultModel ||
+        (state.provider ? state.provider.getSelectedModel() : "") ||
+        "";
       process.stdout.write(
         renderStartupDashboard(
           state.config,
           state.targetPath,
-          gitInfo,
-          state.hudEnabled,
+          state.cachedGit,
+          modelName,
         ),
       );
       return true;
@@ -652,6 +833,10 @@ async function handleCommand(
       await handleMCPCommand(state);
       return true;
 
+    case COMMANDS.ICONS:
+      await handleIconsCommand(state);
+      return true;
+
     default:
       return false;
   }
@@ -666,14 +851,18 @@ async function handleCommand(
 async function handleHudToggle(state: AppState): Promise<void> {
   state.hudEnabled = !state.hudEnabled;
 
-  // Re-render the dashboard with tips shown/hidden
-  const git = detectGitStatus(state.targetPath);
+  // Re-render the dashboard
+  state.cachedGit = detectGitStatus(state.targetPath);
+  const modelName =
+    state.config.provider.defaultModel ||
+    (state.provider ? state.provider.getSelectedModel() : "") ||
+    "";
   process.stdout.write(
     renderStartupDashboard(
       state.config,
       state.targetPath,
-      git,
-      state.hudEnabled,
+      state.cachedGit,
+      modelName,
     ),
   );
 
@@ -759,13 +948,17 @@ async function handleConfCommand(state: AppState): Promise<void> {
       }
 
       if (state.hudEnabled) {
-        const gitRefresh = detectGitStatus(state.targetPath);
+        state.cachedGit = detectGitStatus(state.targetPath);
+        const confModelName =
+          state.config.provider.defaultModel ||
+          (state.provider ? state.provider.getSelectedModel() : "") ||
+          "";
         process.stdout.write(
           renderStartupDashboard(
             state.config,
             state.targetPath,
-            gitRefresh,
-            state.hudEnabled,
+            state.cachedGit,
+            confModelName,
           ),
         );
       }
@@ -1053,6 +1246,9 @@ async function handleAgentMessage(
 
   const effectiveMessage = message || input;
 
+  // Track timing for the progress indicator
+  const startTime = Date.now();
+
   try {
     printBlank();
 
@@ -1060,6 +1256,11 @@ async function handleAgentMessage(
       effectiveMessage,
       fileContext,
     );
+
+    if (currentStreamRenderer) {
+      currentStreamRenderer.end();
+      currentStreamRenderer = null;
+    }
 
     // If streaming was used, the text was already written via onStreamDelta.
     // For non-streaming or if we need to display the final formatted response:
@@ -1070,13 +1271,25 @@ async function handleAgentMessage(
     } else if (response.text && !state.agent) {
       // Fallback for non-streaming mode
       process.stdout.write(formatAgentResponse(response.text) + "\n");
-    } else if (response.text) {
-      // After streaming, add a newline for clean separation
-      process.stdout.write("\n");
     }
+
+    // ── Completion indicator (ui.md Fig. 3: ◎ Done · duration) ────
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    process.stdout.write(
+      "\r\x1b[K\n" +
+        formatProgressIndicator("Done", `${elapsed}s`, false) +
+        "\n",
+    );
 
     printBlank();
   } catch (err) {
+    // ── Error completion indicator ────────────────────────────────
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    process.stdout.write(
+      "\r\x1b[K\n" +
+        formatProgressIndicator("Failed", `${elapsed}s`, false) +
+        "\n",
+    );
     printBlank();
     printError(
       `Agent error: ${err instanceof Error ? err.message : String(err)}`,
@@ -1103,24 +1316,43 @@ function rebuildAgent(state: AppState): void {
       streaming: true,
       onStreamDelta: (delta: StreamDelta) => {
         if (delta.text) {
-          process.stdout.write(delta.text);
+          if (!currentStreamRenderer) {
+            process.stdout.write("\r\x1b[K");
+            currentStreamRenderer = new StreamRenderer({
+              prefix: "  ",
+              firstLinePrefix: `${cyan("◐")} `,
+            });
+          }
+          currentStreamRenderer.append(delta.text);
         }
       },
       onToolCallStart: (toolName, input) => {
-        process.stdout.write(formatToolCallStart(toolName, input) + "\n");
+        if (currentStreamRenderer) {
+          currentStreamRenderer.end();
+          currentStreamRenderer = null;
+        } else {
+          process.stdout.write("\r\x1b[K");
+        }
+        process.stdout.write(formatToolCallCompact(toolName, input) + "\n");
       },
       onToolCallEnd: (toolName, result, durationMs) => {
         process.stdout.write(
-          formatToolCallResult(
+          formatToolResultCompact(
             toolName,
             result.success,
             durationMs,
-            result.content.slice(0, 120),
+            result.content,
           ) + "\n",
         );
       },
       onThinking: (phase) => {
-        process.stdout.write(formatThinkingIndicator(phase) + "\n");
+        if (currentStreamRenderer) {
+          currentStreamRenderer.end();
+          currentStreamRenderer = null;
+        }
+        process.stdout.write(
+          formatThinkingSpinner(0, phase || "Thinking...") + "\x1b[K",
+        );
       },
     };
     state.agent = createAgent(agentConfig);
