@@ -147,7 +147,13 @@ export class StreamRenderer {
     | "list"
     | "hr"
     | "blockquote"
-    | "text" = "blank";
+    | "text"
+    | "thinking" = "blank";
+
+  /** Whether the current text stream is inside a <thinking> or <think> block. */
+  private inThinkingBlock = false;
+  /** Tracks the first rendered line inside a thinking block to use the spinner icon. */
+  private isFirstThinkingLine = true;
 
   // ── Public API ──────────────────────────────────────────────────────────
 
@@ -200,10 +206,33 @@ export class StreamRenderer {
   // ── Line renderer ───────────────────────────────────────────────────────
 
   private renderLine(line: string): void {
-    const width = getTermWidth();
-    const trimmed = line.trim();
+    let processedLine = line;
+    const trimmedBeforeTags = processedLine.trim();
 
-    if (trimmed === "" && !this.inCodeBlock) {
+    // Check for thinking blocks
+    const hasThinkStart = /<think(?:ing)?>/i.test(processedLine);
+    const hasThinkEnd = /<\/think(?:ing)?>/i.test(processedLine);
+
+    if (hasThinkStart) {
+      this.inThinkingBlock = true;
+      this.isFirstThinkingLine = true;
+      processedLine = processedLine.replace(/<think(?:ing)?>/gi, "");
+    }
+    if (hasThinkEnd) {
+      this.inThinkingBlock = false;
+      processedLine = processedLine.replace(/<\/think(?:ing)?>/gi, "");
+    }
+
+    const trimmed = processedLine.trim();
+
+    // If the line only contained tags and is now empty, skip rendering it
+    if (trimmed === "" && (hasThinkStart || hasThinkEnd)) {
+      return;
+    }
+
+    const width = getTermWidth();
+
+    if (trimmed === "" && !this.inCodeBlock && !this.inThinkingBlock) {
       // Collapse consecutive blank lines
       if (this.lastElementType !== "blank") {
         process.stdout.write("\n");
@@ -214,6 +243,21 @@ export class StreamRenderer {
 
     const pfx = this.isFirstLineRendered ? this.prefix : this.firstLinePrefix;
     this.isFirstLineRendered = true;
+
+    // ── Inside thinking block ───────────────────────────────────────────
+    if (this.inThinkingBlock) {
+      const wrapped = wordWrap(processedLine, width - 4);
+      for (const wl of wrapped) {
+        const linePfx = this.isFirstThinkingLine
+          ? `  ${cyan("◐")} `
+          : `  ${dim("│")} `;
+        const colored = dim(gray(this.formatInline(wl)));
+        process.stdout.write(`${linePfx}${colored}\n`);
+        this.isFirstThinkingLine = false;
+      }
+      this.lastElementType = "thinking";
+      return;
+    }
 
     // ── Inside a code block ─────────────────────────────────────────────
 
