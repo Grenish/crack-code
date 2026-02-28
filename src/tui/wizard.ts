@@ -31,6 +31,7 @@ import {
   gray,
   italic,
   stripAnsi,
+  box as drawBox,
   SHIELD_ICON,
   CHECK_MARK,
   CROSS_MARK,
@@ -126,19 +127,19 @@ export interface WizardOptions {
 // ── Banner ──────────────────────────────────────────────────────────────────
 
 const WIZARD_BANNER_LINES = [
-  brightCyan(
+  cyan(
     `_________                       __     _________            .___      `,
   ),
   cyan(
     `\\_   ___ \\____________    ____ |  | __ \\_   ___ \\  ____   __| _/____  `,
   ),
-  brightGreen(
+  cyan(
     `/    \\  \\/\\_  __ \\__  \\ _/ ___\\|  |/ / /    \\  \\/ /  _ \\ / __ |/ __ \\ `,
   ),
-  green(
+  cyan(
     `\\     \\____|  | \\// __ \\\\  \\___|    <  \\     \\___(  <_> ) /_/ \\  ___/ `,
   ),
-  brightCyan(
+  cyan(
     ` \\______  /|__|  (____  /\\___  >__|_ \\  \\______  /\\____/\\____ |\\___  >`,
   ),
   cyan(
@@ -530,8 +531,9 @@ async function stepApiKey(
       );
     }
 
-    // Build the base URL from region
-    const vertexBaseUrl = `https://${effectiveRegion}-aiplatform.googleapis.com`;
+    // Build the base URL from region. We include the project and location
+    // because the model discovery endpoint requires them in the path.
+    const vertexBaseUrl = `https://${effectiveRegion}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${effectiveRegion}`;
 
     // ── Access Token ────────────────────────────────────────────────
     let accessToken = "";
@@ -794,11 +796,6 @@ async function stepModelSelection(
 ): Promise<CrackCodeConfig> {
   const providerLabel = getProviderLabel(config);
 
-  printInfo("4. Select the default model");
-  printInfo(
-    "   These are the models from the API key what suports tool calling and might work with Crack Code.",
-  );
-
   // Fetch models from the provider
   let modelChoices: SelectChoice<string>[] = [];
   let fetchError: string | null = null;
@@ -837,13 +834,7 @@ async function stepModelSelection(
           label: choice.label,
         }));
 
-        printInfo(
-          `Found ${bold(String(displayModels.length))} model${displayModels.length !== 1 ? "s" : ""} ` +
-            (models.toolCallingModels.length > 0
-              ? `(${models.toolCallingModels.length} with tool calling)`
-              : "(tool-calling detection not available for this provider)"),
-        );
-        printBlank();
+        // Silent info logic to match minimal design
       }
     } else {
       fetchError = models.error ?? "Failed to fetch models.";
@@ -869,7 +860,7 @@ async function stepModelSelection(
     });
 
     const selected = await selectOption<string>(
-      "Select your default model:",
+      "4. Select the default model",
       modelChoices,
       { maxVisible: 12 },
     );
@@ -920,16 +911,17 @@ async function stepMCPSetup(
   step: number,
   total: number,
 ): Promise<CrackCodeConfig> {
-  const enableSearch = await confirm("5. Do you want the web search?", {
-    defaultValue: false,
-  });
+  const enableSearch = await confirm(
+    "5. Enable Web Search (Optional MCP server like Brave, Serper, etc.)",
+    {
+      defaultValue: false,
+    },
+  );
 
   if (!enableSearch) {
     config = setMCP(config, false, null, "");
     return config;
   }
-
-  printInfo("   You can configure it later as well.");
 
   // Select web search provider
   const searchChoices: SelectChoice<string>[] = WEB_SEARCH_CHOICES.map(
@@ -1012,97 +1004,80 @@ async function stepMCPSetup(
 // ═════════════════════════════════════════════════════════════════════════════
 
 function renderWizardComplete(config: CrackCodeConfig): void {
-  printInfo("6. Setting up...");
-
   const summary = getConfigSummary(config);
   const validation = validateConfig(config);
 
-  printBlank();
-  process.stdout.write(
-    brightCyan(
-      "  ╔══════════════════════════════════════════════════════════════╗\n",
-    ),
-  );
-  process.stdout.write(
-    brightCyan("  ║") +
-      "                                                              " +
-      brightCyan("║\n"),
-  );
-  process.stdout.write(
-    brightCyan("  ║") +
-      `   ${green(CHECK_MARK)} ${bold(green("Setup Complete!"))}                                        ` +
-      brightCyan("║\n"),
-  );
-  process.stdout.write(
-    brightCyan("  ║") +
-      "                                                              " +
-      brightCyan("║\n"),
-  );
-  process.stdout.write(
-    brightCyan(
-      "  ╚══════════════════════════════════════════════════════════════╝\n",
-    ),
-  );
-  printBlank();
+  const KEY_COL = 14;
 
-  // Summary table
-  printDivider("Configuration Summary", 55);
-  printBlank();
-
-  const kvWidth = 20;
-
-  const kvLine = (key: string, value: string): void => {
-    const paddedKey = key.padEnd(kvWidth);
-    process.stdout.write(`  ${dim(paddedKey)} ${white(value)}\n`);
+  const kvLine = (key: string, val: string): string => {
+    const paddedKey = dim(key.padEnd(KEY_COL));
+    return `${paddedKey} ${val}`;
   };
 
-  kvLine("AI Name:", summary.aiName);
-  kvLine("Host Name:", summary.hostName);
-  kvLine("Provider:", summary.providerLabel);
-  kvLine("Model:", summary.model);
-  kvLine(
-    "API Key:",
-    summary.apiKeySet ? green("configured") : yellow("not set"),
-  );
-  kvLine(
-    "Web Search:",
-    summary.mcpEnabled
-      ? `${green("enabled")} (${summary.mcpProvider ?? "context7"})`
-      : dim("Context7 only"),
-  );
-  kvLine("HUD:", summary.hudEnabled ? green("enabled") : dim("disabled"));
+  const dot = (ok: boolean): string => (ok ? green("●") : yellow("○"));
+
+  const MAX_VAL = 50;
+
+  const truncate = (str: string, max: number = MAX_VAL): string => {
+    if (str.length <= max) return str;
+    return str.slice(0, max - 1) + "…";
+  };
+
+  const apiKeyStatus = summary.apiKeySet
+    ? `${green("configured")} ${dim(truncate(summary.apiKeyMasked, 30))}`
+    : yellow("not set");
+
+  const mcpStatus = summary.mcpEnabled
+    ? `${green("enabled")} ${dim("(" + (summary.mcpProvider ?? "context7") + ")")}`
+    : dim("disabled");
+
+  const hudStatus = summary.hudEnabled ? green("on") : dim("off");
+
+  const configLines: string[] = [
+    "",
+    `${green(CHECK_MARK)} ${bold(green("Setup Complete!"))}`,
+    "",
+    kvLine("AI Name", white(summary.aiName)),
+    kvLine("Host", white(summary.hostName)),
+    "",
+    kvLine(
+      "Provider",
+      `${dot(summary.apiKeySet)} ${white(summary.providerLabel)}`,
+    ),
+    kvLine("Model", white(summary.model || dim("(none)"))),
+    kvLine("API Key", apiKeyStatus),
+    "",
+    kvLine("Web Search", `${dot(summary.mcpEnabled)} ${mcpStatus}`),
+    kvLine("HUD", hudStatus),
+    "",
+  ];
 
   printBlank();
+  process.stdout.write(
+    drawBox(configLines, {
+      title: `${ROCKET_ICON}  Ready`,
+      borderColor: dim,
+      padding: 1,
+    }) + "\n",
+  );
 
-  // Validation warnings
-  if (validation.warnings.length > 0) {
+  // Validation warnings / errors
+  if (validation.warnings.length > 0 || validation.errors.length > 0) {
+    printBlank();
     for (const warning of validation.warnings) {
       printWarning(warning);
     }
-    printBlank();
-  }
-
-  if (validation.errors.length > 0) {
     for (const error of validation.errors) {
       printError(error);
     }
-    printBlank();
   }
 
-  // Usage tips
-  printDivider("Getting Started", 55);
+  // Usage tips — compact, dim
   printBlank();
   process.stdout.write(
-    `  ${dim("Type a message to start analyzing your code's security.")}\n`,
-  );
-  process.stdout.write(
-    `  ${dim("Use")} ${cyan("@path/to/file")} ${dim("to target specific files.")}\n`,
-  );
-  process.stdout.write(
-    `  ${dim("Use")} ${cyan("/help")} ${dim("to see all available commands.")}\n`,
-  );
-  process.stdout.write(
-    `  ${dim("Use")} ${cyan("/conf")} ${dim("to change settings at any time.")}\n`,
+    dim(
+      `  Type a message to start · ${cyan("@file")} ${dim("to mention files")} · ${cyan("/help")} ${dim("for commands")} · ${cyan("/conf")} ${dim("to edit settings")}`,
+    ) + "\n",
   );
   printBlank();
 }
@@ -1119,82 +1094,108 @@ function renderWizardComplete(config: CrackCodeConfig): void {
  */
 export async function runConfigEditor(): Promise<WizardResult> {
   const config = await loadConfig();
-
-  printBlank();
-  printDivider(`${GEAR_ICON} Configuration Editor`, 55);
-  printBlank();
-
-  // Show current config summary
   const summary = getConfigSummary(config);
 
-  const kvWidth = 20;
-  const kvLine = (key: string, value: string): void => {
-    const paddedKey = key.padEnd(kvWidth);
-    process.stdout.write(`  ${dim(paddedKey)} ${white(value)}\n`);
+  // ── Build the settings panel ──────────────────────────────────────
+  const KEY_COL = 14;
+  const MAX_VAL = 50;
+
+  /** Truncate a plain string to fit within the box */
+  const truncate = (str: string, max: number = MAX_VAL): string => {
+    if (str.length <= max) return str;
+    return str.slice(0, max - 1) + "…";
   };
 
-  kvLine("AI Name:", summary.aiName);
-  kvLine("Host Name:", summary.hostName);
-  kvLine("Provider:", summary.providerLabel);
-  kvLine("Model:", summary.model);
-  kvLine(
-    "API Key:",
-    summary.apiKeySet ? green("configured") : yellow("not set"),
-  );
-  kvLine("Base URL:", summary.baseUrl || dim("(default)"));
-  kvLine(
-    "MCP:",
-    summary.mcpEnabled
-      ? `${green("enabled")} (${summary.mcpProvider ?? "context7"})`
-      : dim("Context7 only"),
+  const kvLine = (key: string, val: string): string => {
+    const paddedKey = dim(key.padEnd(KEY_COL));
+    return `${paddedKey} ${val}`;
+  };
+
+  const dot = (ok: boolean): string => (ok ? green("●") : yellow("○"));
+
+  const apiKeyStatus = summary.apiKeySet
+    ? `${green("configured")} ${dim(truncate(summary.apiKeyMasked, 30))}`
+    : yellow("not set");
+
+  const mcpStatus = summary.mcpEnabled
+    ? `${green("enabled")} ${dim("(" + (summary.mcpProvider ?? "context7") + ")")}`
+    : dim("disabled");
+
+  const hudStatus = config.display.hudEnabled ? green("on") : dim("off");
+
+  const configLines: string[] = [
+    "",
+    kvLine("AI Name", white(summary.aiName)),
+    kvLine("Host", white(summary.hostName)),
+    "",
+    kvLine(
+      "Provider",
+      `${dot(summary.apiKeySet)} ${white(summary.providerLabel)}`,
+    ),
+    kvLine("Model", white(summary.model || dim("(none)"))),
+    kvLine("API Key", apiKeyStatus),
+    kvLine("Base URL", white(truncate(summary.baseUrl || "default", MAX_VAL))),
+    "",
+    kvLine("Web Search", `${dot(summary.mcpEnabled)} ${mcpStatus}`),
+    kvLine("HUD", hudStatus),
+    "",
+  ];
+
+  printBlank();
+  process.stdout.write(
+    drawBox(configLines, {
+      title: `${GEAR_ICON}  Settings`,
+      borderColor: dim,
+      padding: 1,
+    }) + "\n",
   );
   printBlank();
 
-  // Section selection
+  // ── Section selection menu ────────────────────────────────────────
   const choices: SelectChoice<string>[] = [
     {
       value: "personalization",
-      label: "Personalization",
-      description: "Change AI name and your display name",
+      label: `  Personalization`,
+      description: "AI name & display name",
     },
     {
       value: "provider",
-      label: "AI Provider",
-      description: "Change provider, API key, and model",
+      label: `  AI Provider`,
+      description: "Provider, API key & model",
     },
     {
       value: "model",
-      label: "Model Only",
-      description: "Change the default model without switching providers",
+      label: `  Model`,
+      description: "Switch model (same provider)",
     },
     {
       value: "mcp",
-      label: "Web Search / MCP",
-      description: "Configure web search providers",
+      label: `  Web Search`,
+      description: "Configure search providers",
     },
     {
       value: "hud",
-      label: "Toggle HUD",
-      description: `Dashboard is currently ${config.display.hudEnabled ? green("enabled") : dim("disabled")}`,
+      label: `  Toggle HUD`,
+      description: `Currently ${hudStatus}`,
     },
     {
       value: "reset",
-      label: yellow("Reset All"),
-      description: "Reset configuration to defaults",
+      label: yellow("  Reset All"),
+      description: "Restore default configuration",
     },
     {
       value: "cancel",
-      label: dim("Cancel"),
+      label: dim("  Back"),
       description: "Return without changes",
     },
   ];
 
-  const selected = await selectOption<string>(
-    "What would you like to change?",
-    choices,
-  );
+  const selected = await selectOption<string>("Edit setting:", choices);
 
+  // ── Handle cancel / escape ────────────────────────────────────────
   if (!selected || selected === "cancel") {
+    printBlank();
+    printInfo("No changes made.");
     return {
       completed: false,
       config,
@@ -1202,14 +1203,15 @@ export async function runConfigEditor(): Promise<WizardResult> {
     };
   }
 
-  // HUD toggle (simple toggle, no wizard step)
+  // ── HUD toggle (instant, no sub-wizard) ───────────────────────────
   if (selected === "hud") {
     const updatedConfig = setDisplay(config, {
       hudEnabled: !config.display.hudEnabled,
     });
     await saveConfig(updatedConfig);
+    printBlank();
     printSuccess(
-      `Dashboard HUD ${updatedConfig.display.hudEnabled ? green("enabled") : dim("disabled")}.`,
+      `HUD ${updatedConfig.display.hudEnabled ? green("enabled") : dim("disabled")}.`,
     );
     return {
       completed: true,
@@ -1218,18 +1220,18 @@ export async function runConfigEditor(): Promise<WizardResult> {
     };
   }
 
-  // Reset
+  // ── Reset ─────────────────────────────────────────────────────────
   if (selected === "reset") {
-    const confirmReset = await confirm(
-      "Are you sure you want to reset ALL configuration?",
-      { defaultValue: false },
-    );
+    printBlank();
+    const confirmReset = await confirm("Reset ALL configuration to defaults?", {
+      defaultValue: false,
+    });
 
     if (confirmReset) {
       const { resetConfig } = await import("../config/index.js");
       const freshConfig = await resetConfig();
       printSuccess("Configuration reset to defaults.");
-      printInfo("Run the wizard again with /conf to set up.");
+      printInfo("Run /conf again to reconfigure.");
       return {
         completed: true,
         config: freshConfig,
@@ -1237,6 +1239,7 @@ export async function runConfigEditor(): Promise<WizardResult> {
       };
     }
 
+    printInfo("Reset cancelled.");
     return {
       completed: false,
       config,
@@ -1244,7 +1247,8 @@ export async function runConfigEditor(): Promise<WizardResult> {
     };
   }
 
-  // Run the specific wizard section
+  // ── Run the specific wizard section ───────────────────────────────
+  printBlank();
   return runWizard({
     section: selected as "personalization" | "provider" | "model" | "mcp",
     skipBanner: true,
