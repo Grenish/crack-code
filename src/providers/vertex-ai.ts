@@ -51,10 +51,7 @@ import {
   type ProviderHealthCheck,
 } from "./base.js";
 
-import {
-  fetchModels,
-  type ModelFetchResult,
-} from "./model-fetcher.js";
+import { fetchModels, type ModelFetchResult } from "./model-fetcher.js";
 
 import {
   AI_PROVIDER,
@@ -219,10 +216,15 @@ class VertexAIProvider extends BaseProvider {
   // ── Model Discovery ─────────────────────────────────────────────────
 
   async listModels(): Promise<ModelFetchResult> {
-    // If no project is configured, try the generic publisher model list.
-    // Vertex AI's publisher list doesn't require a project for read access
-    // when using an authenticated token.
-    return fetchModels(AI_PROVIDER.VERTEX_AI, this.apiKey, this.baseUrl);
+    const match = this.baseUrl.match(/^(https?:\/\/[^\/]+)/);
+    const domain = match ? match[1] : this.baseUrl.replace(/\/+$/, "");
+
+    let fetchUrl = this.baseUrl;
+    if (this.projectId && !this.baseUrl.includes("/projects/")) {
+      fetchUrl = `${domain}/v1/projects/${encodeURIComponent(this.projectId)}/locations/${encodeURIComponent(this.region)}`;
+    }
+
+    return fetchModels(AI_PROVIDER.VERTEX_AI, this.apiKey, fetchUrl);
   }
 
   // ── Health Check ────────────────────────────────────────────────────
@@ -242,7 +244,10 @@ class VertexAIProvider extends BaseProvider {
           error +=
             "\n  Hint: Your access token may have expired. " +
             "Refresh it with: gcloud auth print-access-token";
-        } else if (error.includes("ENOTFOUND") || error.includes("ECONNREFUSED")) {
+        } else if (
+          error.includes("ENOTFOUND") ||
+          error.includes("ECONNREFUSED")
+        ) {
           error +=
             "\n  Hint: Check that GOOGLE_CLOUD_REGION is set correctly " +
             "and the Vertex AI API is enabled in your GCP project.";
@@ -421,9 +426,7 @@ class VertexAIProvider extends BaseProvider {
 
     // Try to extract project from the base URL
     // e.g. .../projects/my-project/locations/...
-    const projectMatch = this.baseUrl.match(
-      /\/projects\/([^/]+)(?:\/|$)/,
-    );
+    const projectMatch = this.baseUrl.match(/\/projects\/([^/]+)(?:\/|$)/);
     if (projectMatch) {
       this.projectId = projectMatch[1]!;
     } else {
@@ -482,35 +485,37 @@ class VertexAIProvider extends BaseProvider {
    *   (Note: this fallback is unlikely to work for Vertex AI; a project is required)
    */
   private buildGenerateUrl(model: string): string {
-    const base = this.baseUrl.replace(/\/+$/, "");
+    const match = this.baseUrl.match(/^(https?:\/\/[^\/]+)/);
+    const domain = match ? match[1] : this.baseUrl.replace(/\/+$/, "");
 
     if (this.projectId) {
       return (
-        `${base}/v1/projects/${encodeURIComponent(this.projectId)}` +
+        `${domain}/v1/projects/${encodeURIComponent(this.projectId)}` +
         `/locations/${encodeURIComponent(this.region)}` +
         `/publishers/google/models/${encodeURIComponent(model)}:generateContent`
       );
     }
 
     // Fallback: publisher-level endpoint (requires project in most cases)
-    return `${base}/v1/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
+    return `${domain}/v1/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
   }
 
   /**
    * Build the streaming endpoint URL for Vertex AI.
    */
   private buildStreamUrl(model: string): string {
-    const base = this.baseUrl.replace(/\/+$/, "");
+    const match = this.baseUrl.match(/^(https?:\/\/[^\/]+)/);
+    const domain = match ? match[1] : this.baseUrl.replace(/\/+$/, "");
 
     if (this.projectId) {
       return (
-        `${base}/v1/projects/${encodeURIComponent(this.projectId)}` +
+        `${domain}/v1/projects/${encodeURIComponent(this.projectId)}` +
         `/locations/${encodeURIComponent(this.region)}` +
         `/publishers/google/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`
       );
     }
 
-    return `${base}/v1/publishers/google/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+    return `${domain}/v1/publishers/google/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
   }
 
   // ── Request Building ────────────────────────────────────────────────
@@ -693,8 +698,7 @@ class VertexAIProvider extends BaseProvider {
       if (i > 0) {
         const prev = fixed[fixed.length - 1]!;
         if (prev.role === current.role) {
-          const placeholderRole =
-            current.role === "user" ? "model" : "user";
+          const placeholderRole = current.role === "user" ? "model" : "user";
           fixed.push({
             role: placeholderRole,
             parts: [
@@ -979,11 +983,9 @@ class VertexAIProvider extends BaseProvider {
           if (chunk.usageMetadata) {
             usage = {
               promptTokens: chunk.usageMetadata.promptTokenCount ?? 0,
-              completionTokens:
-                chunk.usageMetadata.candidatesTokenCount ?? 0,
+              completionTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
               totalTokens: chunk.usageMetadata.totalTokenCount ?? 0,
-              cachedTokens:
-                chunk.usageMetadata.cachedContentTokenCount,
+              cachedTokens: chunk.usageMetadata.cachedContentTokenCount,
             };
             onDelta({ usage });
           }
@@ -1018,9 +1020,7 @@ class VertexAIProvider extends BaseProvider {
                     toolUse: {
                       id,
                       name: part.functionCall.name,
-                      inputDelta: JSON.stringify(
-                        part.functionCall.args ?? {},
-                      ),
+                      inputDelta: JSON.stringify(part.functionCall.args ?? {}),
                     },
                   });
                 }
@@ -1156,9 +1156,6 @@ class VertexAIProvider extends BaseProvider {
  *                  Project ID comes from GOOGLE_CLOUD_PROJECT env var.
  * @returns A configured VertexAIProvider instance.
  */
-export function createProvider(
-  apiKey: string,
-  baseUrl: string,
-): BaseProvider {
+export function createProvider(apiKey: string, baseUrl: string): BaseProvider {
   return new VertexAIProvider(apiKey, baseUrl);
 }
