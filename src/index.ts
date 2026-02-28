@@ -142,9 +142,10 @@ import {
   formatToolResultCompact,
   formatThinkingSpinner,
   formatProgressIndicator,
+  formatUserInput,
   type ScanSummaryInput,
-} from "./output/formatter";
-import { StreamRenderer } from "./output/stream-renderer";
+} from "./output/formatter.js";
+import { StreamRenderer } from "./output/stream-renderer.js";
 
 let currentStreamRenderer: StreamRenderer | null = null;
 
@@ -197,7 +198,10 @@ function shortenPath(p: string): string {
 
 /** Get terminal width, clamped */
 function getTermWidth(): number {
-  return Math.max(40, (process.stdout as NodeJS.WriteStream).columns || 80);
+  return Math.min(
+    100,
+    Math.max(40, (process.stdout as NodeJS.WriteStream).columns || 80),
+  );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -211,7 +215,6 @@ function renderStartupDashboard(
   modelName: string,
 ): string {
   const lines: string[] = [];
-  const width = getTermWidth();
 
   // Clear screen + home
   lines.push("\x1B[2J\x1B[H");
@@ -219,30 +222,32 @@ function renderStartupDashboard(
   // ── Banner ─────────────────────────────────────────────────────────
   lines.push(renderBannerString());
 
-  // ── Meta info block (aligned labels) ───────────────────────────────
-  //    version: 0.1.0
-  //      Host: grenishrai
-  //      Repo: /home/grenishrai/Desktop/apps/crack-code
-  //       Git: True ( main )
+  // ── Meta info block ────────────────────────────────────────────────
   const hostName = config.display.hostName || "User";
   const homeDir = process.env["HOME"] || process.env["USERPROFILE"] || "~";
   const isHomeDir = targetPath === homeDir || targetPath === homeDir + "/";
+  const META_KEY = 10; // right-align labels to this width
 
-  lines.push(`${dim("version:")} ${white(APP_VERSION)}`);
-  lines.push(`${dim(" Host:")} ${brightCyan(hostName)}`);
+  const metaLine = (label: string, val: string): string => {
+    return `${dim(label.padStart(META_KEY) + ":")} ${val}`;
+  };
+
+  lines.push(metaLine("version", white(APP_VERSION)));
+  lines.push(metaLine("host", brightCyan(hostName)));
   if (isHomeDir) {
-    lines.push(
-      `${dim(" Repo:")} ${yellow(` Warning: running in home directory`)}`,
-    );
+    lines.push(metaLine("repo", yellow("Warning: running in home directory")));
   } else {
-    lines.push(`${dim(" Repo:")} ${cyan(targetPath)}`);
+    lines.push(metaLine("repo", cyan(shortenPath(targetPath))));
   }
   if (git.isRepo) {
     lines.push(
-      `${dim(" Git Enabled :")} ${green("True")} ${dim("(")} ${magenta(git.branch)}${dim(")")}`,
+      metaLine("git", `${green("active")} ${dim("·")} ${magenta(git.branch)}`),
     );
   } else {
-    lines.push(`${dim(" Git Enabled :")} ${dim("False")}`);
+    lines.push(metaLine("git", dim("none")));
+  }
+  if (modelName) {
+    lines.push(metaLine("model", dim(modelName)));
   }
 
   lines.push("");
@@ -250,21 +255,6 @@ function renderStartupDashboard(
   // ── Welcome greeting ───────────────────────────────────────────────
   const name = config.display.hostName || "there";
   lines.push(`Hello ${brightCyan(name)}, what are we cracking today?`);
-  lines.push("");
-
-  // ── Context bar (shown once) ───────────────────────────────────────
-  //    ~/Desktop/apps/crack-code (  main )              gemini-3-flash-preview
-  //    -----------------------------------------------------------------------------
-  const displayPath = shortenPath(targetPath);
-  const leftPart = git.isRepo
-    ? `${cyan(displayPath)} ${dim("(")} ${magenta(git.branch)}${dim(")")}`
-    : cyan(displayPath);
-  const rightPart = modelName ? dim(modelName) : dim("no model");
-  const leftLen = stripAnsi(leftPart).length;
-  const rightLen = stripAnsi(rightPart).length;
-  const gap = Math.max(2, width - leftLen - rightLen);
-  lines.push(leftPart + " ".repeat(gap) + rightPart);
-  lines.push(dim("-".repeat(width)));
 
   return lines.join("\n");
 }
@@ -275,7 +265,24 @@ function renderStartupDashboard(
 
 /** The simple `> ` prompt shown on each REPL iteration */
 function getCrackPrompt(): string {
-  return `${dim("❯")} `;
+  return `  ${dim("❯")} `;
+}
+
+/** Render the input box top border with embedded hint */
+function renderInputBoxTop(): string {
+  const width = getTermWidth();
+  const hint = " @ files · / commands · /help ";
+  const hintLen = hint.length;
+  const remaining = Math.max(0, width - 2 - hintLen);
+  const left = Math.floor(remaining * 0.02);
+  const right = remaining - left;
+  return dim("─".repeat(left)) + dim(hint) + dim("─".repeat(right));
+}
+
+/** Render the input box bottom border */
+function renderInputBoxBottom(): string {
+  const width = getTermWidth();
+  return dim("─".repeat(width));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -298,6 +305,11 @@ const COMMAND_LIST: Array<[string, string]> = [
   ["/quit", "Exit Crack Code"],
 ];
 
+interface CompletionItem {
+  text: string;
+  desc?: string;
+}
+
 /**
  * Build a readline completer function that handles:
  *   - `/` prefix → slash-command completion
@@ -305,26 +317,28 @@ const COMMAND_LIST: Array<[string, string]> = [
  */
 function buildCompleter(
   projectRoot: string,
-): (line: string) => [string[], string] {
-  return (line: string): [string[], string] => {
-    // Find the current token (last whitespace-delimited word)
+): (line: string) => [CompletionItem[], string] {
+  return (line: string): [CompletionItem[], string] => {
     const tokens = line.split(/\s+/);
     const current = tokens[tokens.length - 1] || "";
 
     // ── / command completion ──────────────────────────────────────
     if (current.startsWith("/")) {
-      const matches = COMMAND_LIST.filter(([cmd]) =>
+      const filtered = COMMAND_LIST.filter(([cmd]) =>
         cmd.startsWith(current.toLowerCase()),
-      ).map(([cmd]) => cmd);
-      return [
-        matches.length > 0 ? matches : COMMAND_LIST.map(([c]) => c),
-        current,
-      ];
+      );
+      const items = (filtered.length > 0 ? filtered : COMMAND_LIST).map(
+        ([cmd, desc]) => ({
+          text: cmd,
+          desc,
+        }),
+      );
+      return [items, current];
     }
 
     // ── @ file/directory completion ───────────────────────────────
     if (current.startsWith("@")) {
-      const partial = current.slice(1); // strip leading @
+      const partial = current.slice(1);
       const lastSlash = partial.lastIndexOf("/");
       const dirPart = lastSlash >= 0 ? partial.slice(0, lastSlash + 1) : "";
       const filePart = lastSlash >= 0 ? partial.slice(lastSlash + 1) : partial;
@@ -332,18 +346,21 @@ function buildCompleter(
       const searchDir = resolve(projectRoot, dirPart || ".");
       try {
         const entries = readdirSync(searchDir);
-        const matches: string[] = [];
+        const matches: CompletionItem[] = [];
         for (const entry of entries) {
-          // Skip hidden files and common noise
           if (entry.startsWith(".") || entry === "node_modules") continue;
           if (!entry.toLowerCase().startsWith(filePart.toLowerCase())) continue;
 
           try {
             const st = statSync(resolve(searchDir, entry));
             const suffix = st.isDirectory() ? "/" : "";
-            matches.push("@" + dirPart + entry + suffix);
+            const isDir = st.isDirectory();
+            matches.push({
+              text: "@" + dirPart + entry + suffix,
+              desc: isDir ? "Directory" : "File",
+            });
           } catch {
-            matches.push("@" + dirPart + entry);
+            matches.push({ text: "@" + dirPart + entry });
           }
         }
         return [matches, current];
@@ -352,7 +369,6 @@ function buildCompleter(
       }
     }
 
-    // No special completion
     return [[], current];
   };
 }
@@ -658,7 +674,11 @@ async function startREPL(state: AppState): Promise<void> {
     input: process.stdin,
     output: process.stdout,
     terminal: process.stdin.isTTY ?? false,
-    completer,
+    // Provide a dummy completer for Tab support
+    completer: (line: string) => {
+      const [items, current] = completer(line);
+      return [items.map((i) => i.text), current];
+    },
   });
 
   rl.on("SIGINT", () => {
@@ -669,24 +689,59 @@ async function startREPL(state: AppState): Promise<void> {
     getSession().exit();
   });
 
-  // Show the hint once before the first prompt
-  process.stdout.write(
-    dim("> Type ") +
-      cyan("@") +
-      dim(" to mention files, ") +
-      cyan("/") +
-      dim(" for commands, or ") +
-      cyan("/help") +
-      dim(" for help") +
-      "\n" +
-      dim("-".repeat(getTermWidth())) +
-      "\n",
-  );
+  // Realtime completion renderer
+  const renderCompletions = () => {
+    const line = rl.line;
+    if (!line) return;
+    const tokens = line.split(/\s+/);
+    const current = tokens[tokens.length - 1] || "";
+    if (!current.startsWith("/") && !current.startsWith("@")) return;
+
+    const [items] = completer(line);
+    if (items.length === 0) return;
+
+    // Move cursor down safely, clear lines, render matches
+    process.stdout.write("\x1B[s"); // Save cursor
+    process.stdout.write("\n\x1B[0J"); // Move down one line and clear below
+
+    // Show up to 8 max
+    const maxItems = Math.min(items.length, 8);
+    for (let i = 0; i < maxItems; i++) {
+      const item = items[i]!;
+      const desc = item.desc ? dim(` ${item.desc}`) : "";
+      process.stdout.write(`  ${cyan(item.text)}${desc}\n`);
+    }
+    if (items.length > maxItems) {
+      process.stdout.write(dim(`  ... and ${items.length - maxItems} more\n`));
+    }
+
+    process.stdout.write(renderInputBoxBottom() + "\n");
+    process.stdout.write("\x1B[u"); // Restore cursor
+  };
 
   const promptForInput = (): Promise<string> => {
     return new Promise((resolve) => {
       const prefix = getCrackPrompt();
+
+      // Render the top border of the input box
+      process.stdout.write(renderInputBoxTop() + "\n");
+
+      const onKeypress = () => {
+        // Wait for readline to process the key and update rl.line
+        setTimeout(() => {
+          // Clear any previous completions first
+          process.stdout.write("\x1B[s\n\x1B[0J\x1B[u");
+          renderCompletions();
+        }, 0);
+      };
+
+      process.stdin.on("keypress", onKeypress);
+
       rl.question(prefix, (answer) => {
+        process.stdin.off("keypress", onKeypress);
+        process.stdout.write("\x1B[s\n\x1B[0J\x1B[u"); // Clear completions
+        // Render the bottom border of the input box
+        process.stdout.write(renderInputBoxBottom() + "\n");
         resolve(answer?.trim() ?? "");
       });
     });
@@ -818,23 +873,50 @@ async function handleCommand(
       return true;
 
     case COMMANDS.CONF:
-      await handleConfCommand(state);
+      // Pause the REPL readline so the config editor's own readline/raw-mode
+      // handlers don't conflict with it (prevents input duplication & quit-on-cancel).
+      rl.pause();
+      try {
+        await handleConfCommand(state);
+      } finally {
+        rl.resume();
+      }
       return true;
 
     case COMMANDS.SCAN:
-      await handleScanCommand(state);
+      rl.pause();
+      try {
+        await handleScanCommand(state);
+      } finally {
+        rl.resume();
+      }
       return true;
 
     case COMMANDS.REPORT:
-      await handleReportCommand(state);
+      rl.pause();
+      try {
+        await handleReportCommand(state);
+      } finally {
+        rl.resume();
+      }
       return true;
 
     case COMMANDS.MCP:
-      await handleMCPCommand(state);
+      rl.pause();
+      try {
+        await handleMCPCommand(state);
+      } finally {
+        rl.resume();
+      }
       return true;
 
     case COMMANDS.ICONS:
-      await handleIconsCommand(state);
+      rl.pause();
+      try {
+        await handleIconsCommand(state);
+      } finally {
+        rl.resume();
+      }
       return true;
 
     default:
@@ -897,7 +979,8 @@ async function handleConfCommand(state: AppState): Promise<void> {
   try {
     const result = await runConfigEditor();
 
-    if (result.config) {
+    // Only apply changes and re-bootstrap if the editor completed (not cancelled)
+    if (result.completed && result.config) {
       state.config = result.config;
       state.hudEnabled = state.config.display.hudEnabled;
 
@@ -1251,6 +1334,8 @@ async function handleAgentMessage(
 
   try {
     printBlank();
+    process.stdout.write(formatUserInput(effectiveMessage) + "\n");
+    printBlank();
 
     const response = await state.agent.processMessage(
       effectiveMessage,
@@ -1275,9 +1360,16 @@ async function handleAgentMessage(
 
     // ── Completion indicator (ui.md Fig. 3: ◎ Done · duration) ────
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const apiCount = response.apiCallCount ?? 0;
+    const tokens = response.totalUsage?.totalTokens ?? 0;
+
     process.stdout.write(
       "\r\x1b[K\n" +
-        formatProgressIndicator("Done", `${elapsed}s`, false) +
+        formatProgressIndicator(
+          "Done",
+          `${elapsed}s · ${apiCount} API calls · ${tokens} tokens`,
+          false,
+        ) +
         "\n",
     );
 
