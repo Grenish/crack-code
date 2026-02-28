@@ -283,7 +283,8 @@ export const MODEL_DISCOVERY: Record<AIProvider, ModelDiscoveryConfig> = {
   // Tool-calling: same as Gemini — check supportedGenerationMethods.
   [AI_PROVIDER.VERTEX_AI]: {
     method: "GET",
-    path: "/v1/publishers/google/models",
+    // Base URL includes /v1/projects/{project}/locations/{region}
+    path: "/publishers/google/models",
     authStyle: "bearer",
     modelsArrayPath: "models",
     modelIdKey: "name",
