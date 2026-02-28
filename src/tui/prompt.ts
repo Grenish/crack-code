@@ -263,52 +263,62 @@ function rawPassword(
 
     const stdin = process.stdin as NodeJS.ReadStream;
     const wasRaw = stdin.isRaw;
+    const wasFlowing = stdin.readableFlowing === true;
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding("utf-8");
 
     let input = "";
 
-    const onData = (char: string): void => {
-      const code = char.charCodeAt(0);
-
-      // Ctrl+C
-      if (char === "\x03") {
-        stdin.setRawMode(wasRaw ?? false);
-        stdin.removeListener("data", onData);
+    function restoreStdin(): void {
+      stdin.setRawMode(wasRaw ?? false);
+      stdin.removeListener("data", onData);
+      if (!wasFlowing) {
         stdin.pause();
-        writeLine("");
-        resolve("");
-        return;
       }
+    }
 
-      // Enter
-      if (char === "\r" || char === "\n") {
-        stdin.setRawMode(wasRaw ?? false);
-        stdin.removeListener("data", onData);
-        stdin.pause();
-        writeLine("");
-        resolve(input);
-        return;
-      }
+    const onData = (data: Buffer | string): void => {
+      const str = data.toString();
+      for (let i = 0; i < str.length; i++) {
+        const char = str[i];
+        if (!char) continue;
+        const code = char.charCodeAt(0);
 
-      // Backspace / Delete
-      if (code === 127 || code === 8) {
-        if (input.length > 0) {
-          input = input.slice(0, -1);
-          // Move cursor back, write space, move back again
-          write("\b \b");
+        // Ctrl+C
+        if (char === "\x03") {
+          restoreStdin();
+          writeLine("");
+          resolve("");
+          return;
         }
-        return;
-      }
 
-      // Ignore non-printable characters
-      if (code < 32) {
-        return;
-      }
+        // Enter
+        if (char === "\r" || char === "\n") {
+          restoreStdin();
+          writeLine("");
+          resolve(input);
+          return;
+        }
 
-      input += char;
-      write(mask);
+        // Backspace / Delete
+        if (code === 127 || code === 8) {
+          if (input.length > 0) {
+            input = input.slice(0, -1);
+            // Move cursor back, write space, move back again
+            write("\b \b");
+          }
+          continue;
+        }
+
+        // Ignore non-printable characters
+        if (code < 32) {
+          continue;
+        }
+
+        input += char;
+        write(mask);
+      }
     };
 
     stdin.on("data", onData);
@@ -428,6 +438,7 @@ function arrowSelect<T>(
   return new Promise((resolve) => {
     const stdin = process.stdin as NodeJS.ReadStream;
     const wasRaw = stdin.isRaw;
+    const wasFlowing = stdin.readableFlowing === true;
 
     let selectedIndex = choices.findIndex((c) => !c.disabled);
     if (selectedIndex === -1) {
@@ -505,7 +516,11 @@ function arrowSelect<T>(
     function cleanup(): void {
       stdin.setRawMode(wasRaw ?? false);
       stdin.removeListener("data", onKey);
-      stdin.pause();
+      // Only pause stdin if it was NOT flowing before we started —
+      // otherwise we kill the REPL's readline which shares the same stdin.
+      if (!wasFlowing) {
+        stdin.pause();
+      }
       write(cursorShow());
     }
 
@@ -735,6 +750,7 @@ function arrowMultiSelect<T>(
   return new Promise((resolve) => {
     const stdin = process.stdin as NodeJS.ReadStream;
     const wasRaw = stdin.isRaw;
+    const wasFlowing = stdin.readableFlowing === true;
 
     let selectedIndex = choices.findIndex((c) => !c.disabled);
     if (selectedIndex === -1) {
@@ -818,7 +834,9 @@ function arrowMultiSelect<T>(
     function cleanup(): void {
       stdin.setRawMode(wasRaw ?? false);
       stdin.removeListener("data", onKey);
-      stdin.pause();
+      if (!wasFlowing) {
+        stdin.pause();
+      }
       write(cursorShow());
     }
 
@@ -956,6 +974,7 @@ export async function waitForKey(
   return new Promise((resolve) => {
     const stdin = process.stdin as NodeJS.ReadStream;
     const wasRaw = stdin.isRaw;
+    const wasFlowing = stdin.readableFlowing === true;
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding("utf-8");
@@ -963,7 +982,9 @@ export async function waitForKey(
     const onKey = (): void => {
       stdin.setRawMode(wasRaw ?? false);
       stdin.removeListener("data", onKey);
-      stdin.pause();
+      if (!wasFlowing) {
+        stdin.pause();
+      }
       writeLine("");
       resolve();
     };
