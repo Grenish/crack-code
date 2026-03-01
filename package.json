@@ -1,70 +1,11 @@
 {
   "name": "crack-code",
-  "version": "0.1.0",
-  "description": "AI-powered CLI security analysis tool that scans codebases to detect vulnerabilities, insecure patterns, secrets exposure, injection risks, and architectural weaknesses — without ever modifying your source files.",
+  "module": "src/index.ts",
   "type": "module",
-  "main": "dist/index.js",
-  "module": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "bin": {
-    "crack-code": "dist/index.js"
-  },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
-  "scripts": {
-    "build": "bun run scripts/build.ts",
-    "dev": "bun run src/index.ts",
-    "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist",
-    "prepublishOnly": "bun run clean && bun run build"
-  },
-  "keywords": [
-    "security",
-    "vulnerability",
-    "scanner",
-    "static-analysis",
-    "ai",
-    "cli",
-    "code-review",
-    "secrets-detection",
-    "dependency-audit",
-    "injection",
-    "mcp",
-    "llm",
-    "codebase-scanner",
-    "remediation",
-    "crack-code"
-  ],
-  "author": "",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": ""
-  },
-  "bugs": {
-    "url": ""
-  },
-  "homepage": "",
-  "engines": {
-    "node": ">=18.0.0"
-  },
-  "os": [
-    "darwin",
-    "linux",
-    "win32"
-  ],
   "devDependencies": {
-    "@types/bun": "latest",
-    "@types/node": "^22.0.0"
+    "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
-  },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
   }
 }
