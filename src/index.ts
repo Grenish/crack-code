@@ -39,7 +39,7 @@ AI-powered security auditor for your codebase.
   -i, --interactive          Force interactive REPL mode
   --setup                    Re-run first-time setup wizard
   --allow-edits              Enable file writing (read-only by default)
-  --provider <name>          Override provider (anthropic, openai, google)
+  --provider <name>          Override provider (anthropic, azure, google, openai, ollama, vertex)
   --model <name>             Override model
   --key <key>                Override API key
   --policy <policy>          Permission policy (ask, skip, allow-all, deny-all)
@@ -188,7 +188,7 @@ async function main(): Promise<void> {
 
   let model;
   try {
-    model = getModel(config.provider, config.model, config.apiKey);
+    model = getModel(config);
   } catch (e: any) {
     ui.error(e.message);
     process.exit(1);
