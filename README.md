@@ -17,7 +17,7 @@ Scans for vulnerabilities, explains findings with exact code references, and opt
 ## Features
 
 - 🛡️ **Security-first** — finds injections, hardcoded secrets, auth flaws, SSRF, XSS, and more
-- 🤖 **Provider-agnostic** — Anthropic, OpenAI, Google, or Ollama with one flag
+- 🤖 **Provider-agnostic** — Anthropic, OpenAI, Google, Azure, Vertex AI, or Ollama with one flag
 - 🔒 **Read-only by default** — never modifies files unless you explicitly allow it
 - ⚡ **Streaming** — results appear in real-time as the AI analyzes
 - 🧰 **Agentic** — reads files, lists directories, runs commands, and writes fixes
@@ -60,7 +60,7 @@ crack-code --yolo "scan and fix everything"
 -i, --interactive          Force interactive REPL mode
 --setup                    Re-run the setup wizard
 --allow-edits              Enable file writing (read-only by default)
---provider <name>          Override provider (anthropic, openai, google, ollama)
+--provider <name>          Override provider (anthropic, azure, google, openai, ollama, vertex)
 --model <name>             Override model
 --key <key>                Override API key
 --policy <policy>          Permission policy (ask, skip, allow-all, deny-all)
@@ -109,9 +109,14 @@ crack-code --setup
 | Variable                       | Provider   |
 | ------------------------------ | ---------- |
 | `ANTHROPIC_API_KEY`            | Anthropic  |
-| `OPENAI_API_KEY`               | OpenAI     |
+| `AZURE_API_KEY`                | Azure      |
+| `AZURE_RESOURCE_NAME`          | Azure      |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | Google     |
+| `OPENAI_API_KEY`               | OpenAI     |
 | `OLLAMA_ENDPOINT`              | Ollama     |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Vertex AI |
+| `GOOGLE_CLOUD_PROJECT`         | Vertex AI  |
+| `GOOGLE_CLOUD_LOCATION`        | Vertex AI  |
 
 If set, the setup wizard will detect and offer to use them.
 
