@@ -1,0 +1,25 @@
+{
+  "name": "crack-code",
+  "module": "src/index.ts",
+  "scripts": {
+    "dev": "bun run src/index.ts"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/gradient-string": "^1.1.6"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.54",
+    "@ai-sdk/google": "^3.0.37",
+    "@ai-sdk/openai": "^3.0.39",
+    "ai": "^6.0.111",
+    "gradient-string": "^3.0.0",
+    "ollama-ai-provider-v2": "^3.3.1",
+    "picocolors": "^1.1.1",
+    "zod": "^4.3.6"
+  }
+}
