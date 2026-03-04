@@ -5,18 +5,28 @@ import pc from "picocolors";
 
 import type { ModelInfo } from "./providers/types";
 import { fetchAnthropicModels } from "./providers/anthropic";
+import { fetchAzureModels } from "./providers/azure";
 import { fetchGoogleModels } from "./providers/google";
 import { fetchOpenAIModels } from "./providers/openai";
 import { fetchOllamaModels } from "./providers/ollama";
+import { fetchVertexModels } from "./providers/vertex";
 
 import * as readline from "node:readline";
 import { CrackCodeLogo } from "./logo/crack-code";
 import { pastel } from "gradient-string";
 
 export interface Config {
-  provider: "openai" | "google" | "anthropic" | "ollama";
+  provider: "openai" | "google" | "anthropic" | "ollama" | "azure" | "vertex";
   model: string;
   apiKey: string;
+
+  // azure
+  resourceName?: string;
+  // vertex
+  project?: string;
+  location?: string;
+  vertexClientEmail?: string;
+  vertexPrivateKey?: string;
 
   // generation
   maxTokens: number;
@@ -44,6 +54,13 @@ interface StoredConfig {
   model: string;
   apiKey: string;
   allowEdits?: boolean;
+  // Azure-specific
+  resourceName?: string;
+  // Vertex-specific
+  project?: string;
+  location?: string;
+  vertexClientEmail?: string;
+  vertexPrivateKey?: string;
 }
 
 export interface ConfigOverrides {
@@ -62,13 +79,22 @@ export interface ConfigOverrides {
 const CONFIG_DIR = join(homedir(), ".crack-code");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 
-const PROVIDERS = ["anthropic", "google", "openai", "ollama"] as const;
+const PROVIDERS = [
+  "anthropic",
+  "azure",
+  "google",
+  "openai",
+  "ollama",
+  "vertex",
+] as const;
 
 const API_KEY_ENV: Record<Config["provider"], string> = {
   anthropic: "ANTHROPIC_API_KEY",
-  openai: "OPENAI_API_KEY",
+  azure: "AZURE_API_KEY",
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
   ollama: "OLLAMA_ENDPOINT",
+  openai: "OPENAI_API_KEY",
+  vertex: "", // Vertex uses service account JSON — no single env key
 };
 
 const DEFAULT_SCAN_PATTERNS = [
@@ -138,23 +164,61 @@ async function writeStoredConfig(stored: StoredConfig): Promise<any> {
 }
 
 // function for fetching models from the providers api
+interface FetchModelsContext {
+  resourceName?: string;
+  project?: string;
+  location?: string;
+  vertexClientEmail?: string;
+  vertexPrivateKey?: string;
+}
+
 async function fetchModels(
   provider: Config["provider"],
   apiKey: string,
+  ctx: FetchModelsContext = {},
 ): Promise<ModelInfo[]> {
   try {
     switch (provider) {
       case "anthropic":
         return await fetchAnthropicModels(apiKey);
+      case "azure": {
+        const resource = ctx.resourceName ?? process.env.AZURE_RESOURCE_NAME;
+        if (!resource) {
+          console.log(
+            pc.yellow("\n  Set AZURE_RESOURCE_NAME to list deployed models.\n"),
+          );
+          return [];
+        }
+        return await fetchAzureModels(apiKey, resource);
+      }
       case "google":
         return await fetchGoogleModels(apiKey);
       case "openai":
         return await fetchOpenAIModels(apiKey);
       case "ollama":
-        return await fetchOllamaModels(apiKey); // Fetching the available models that supports tool calling.
+        return await fetchOllamaModels(apiKey);
+      case "vertex": {
+        const project = ctx.project ?? process.env.GOOGLE_CLOUD_PROJECT;
+        const location =
+          ctx.location ?? process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1";
+        if (!project) {
+          console.log(
+            pc.yellow(
+              "\n  Set GOOGLE_CLOUD_PROJECT to list Vertex AI models.\n",
+            ),
+          );
+          return [];
+        }
+        return await fetchVertexModels(
+          project,
+          location,
+          ctx.vertexClientEmail,
+          ctx.vertexPrivateKey,
+        );
+      }
     }
   } catch (e: any) {
-    console.log(pc.red(`\n  Could not fetch models: ${e.message}\n`));
+    console.log(pc.red(`\n  Could not fetch models: ${e.message}\n`));
     return [];
   }
 }
@@ -209,30 +273,127 @@ async function firstRunSetup(): Promise<StoredConfig> {
   }
   const provider = PROVIDERS[providerIdx]!;
 
-  //  API key
-  const envKey = process.env[API_KEY_ENV[provider]];
-  let apiKey: string;
+  // Provider-specific credential gathering
+  let apiKey = "";
+  let resourceName: string | undefined;
+  let project: string | undefined;
+  let location: string | undefined;
 
-  if (envKey) {
-    const masked = envKey.slice(0, 8) + "..." + envKey.slice(-4);
-    const useEnv = await prompt(
-      `\nFound ${API_KEY_ENV[provider]} (${masked}). Use it? [Y/n]: `,
+  // Vertex service account fields (populated below if provider is vertex)
+  let vertexClientEmail: string | undefined;
+  let vertexPrivateKey: string | undefined;
+
+  if (provider === "vertex") {
+    // Vertex uses a service account JSON for authentication
+    console.log(
+      "\n\x1b[90mVertex AI authenticates via a Google Cloud service account JSON.\x1b[0m",
     );
-    if (!useEnv || useEnv.toLowerCase() === "y") {
-      apiKey = envKey;
-    } else {
-      apiKey = await prompt("Enter API key: ");
-    }
-  } else {
-    apiKey = await prompt(`\nEnter your ${provider} API key: `);
-  }
+    console.log(
+      "\x1b[90mYou can get one from: https://console.cloud.google.com/iam-admin/serviceaccounts\x1b[0m",
+    );
+    console.log(
+      "\x1b[90mCreate a key (JSON) for the service account and paste the file path below.\x1b[0m\n",
+    );
 
-  if (!apiKey) {
-    throw new Error("API key is required.");
+    const saPath = await prompt("Path to service account JSON file: ");
+    if (!saPath)
+      throw new Error("Service account JSON path is required for Vertex AI.");
+
+    // Read and parse the service account JSON
+    let saJson: {
+      client_email?: string;
+      private_key?: string;
+      project_id?: string;
+    };
+    try {
+      const saFile = Bun.file(saPath.replace(/^~/, homedir()));
+      if (!(await saFile.exists())) {
+        throw new Error(`File not found: ${saPath}`);
+      }
+      saJson = await saFile.json();
+    } catch (e: any) {
+      throw new Error(`Failed to read service account JSON: ${e.message}`);
+    }
+
+    if (!saJson.client_email || !saJson.private_key) {
+      throw new Error(
+        "Invalid service account JSON — missing client_email or private_key.",
+      );
+    }
+
+    vertexClientEmail = saJson.client_email;
+    vertexPrivateKey = saJson.private_key;
+
+    // Use project_id from the JSON if available, otherwise ask
+    project =
+      saJson.project_id ??
+      process.env.GOOGLE_CLOUD_PROJECT ??
+      (await prompt("\nGoogle Cloud project ID: "));
+    if (!project) throw new Error("Project ID is required for Vertex AI.");
+
+    location =
+      (process.env.GOOGLE_CLOUD_LOCATION ??
+        (await prompt("Location [us-central1]: "))) ||
+      "us-central1";
+
+    // Use a placeholder — Vertex authenticates via service account, not a pasted key
+    apiKey = "service-account";
+
+    console.log(pc.green(`\n✓ Service account loaded: ${vertexClientEmail}`));
+  } else if (provider === "azure") {
+    // Azure needs both an API key and a resource name
+    const envKey = process.env.AZURE_API_KEY;
+
+    if (envKey) {
+      const masked = envKey.slice(0, 8) + "..." + envKey.slice(-4);
+      const useEnv = await prompt(
+        `\nFound AZURE_API_KEY (${masked}). Use it? [Y/n]: `,
+      );
+      apiKey =
+        !useEnv || useEnv.toLowerCase() === "y"
+          ? envKey
+          : await prompt("Enter Azure API key: ");
+    } else {
+      apiKey = await prompt("\nEnter your Azure API key: ");
+    }
+    if (!apiKey) throw new Error("API key is required.");
+
+    resourceName =
+      process.env.AZURE_RESOURCE_NAME ??
+      (await prompt("Azure resource name: "));
+    if (!resourceName)
+      throw new Error("Resource name is required for Azure OpenAI.");
+  } else {
+    // Standard providers — single API key
+    const envKey = process.env[API_KEY_ENV[provider]];
+
+    if (envKey) {
+      const masked = envKey.slice(0, 8) + "..." + envKey.slice(-4);
+      const useEnv = await prompt(
+        `\nFound ${API_KEY_ENV[provider]} (${masked}). Use it? [Y/n]: `,
+      );
+      if (!useEnv || useEnv.toLowerCase() === "y") {
+        apiKey = envKey;
+      } else {
+        apiKey = await prompt("Enter API key: ");
+      }
+    } else {
+      apiKey = await prompt(`\nEnter your ${provider} API key: `);
+    }
+
+    if (!apiKey) {
+      throw new Error("API key is required.");
+    }
   }
 
   const loading = spinner("Fetching available models...");
-  const models = await fetchModels(provider, apiKey);
+  const models = await fetchModels(provider, apiKey, {
+    resourceName,
+    project,
+    location,
+    vertexClientEmail,
+    vertexPrivateKey,
+  });
   loading.stop();
 
   let model: string;
@@ -283,7 +444,16 @@ async function firstRunSetup(): Promise<StoredConfig> {
       throw new Error("Model is required.");
     }
   }
-  const stored: StoredConfig = { provider, model, apiKey };
+  const stored: StoredConfig = {
+    provider,
+    model,
+    apiKey,
+    ...(resourceName ? { resourceName } : {}),
+    ...(project ? { project } : {}),
+    ...(location && location !== "us-central1" ? { location } : {}),
+    ...(vertexClientEmail ? { vertexClientEmail } : {}),
+    ...(vertexPrivateKey ? { vertexPrivateKey } : {}),
+  };
   await writeStoredConfig(stored);
 
   console.log(`\n\x1b[32m✓ Saved: provider=${provider}, model=${model}\x1b[0m`);
@@ -371,9 +541,12 @@ export async function loadConfig(
     );
   }
 
+  const envKey = API_KEY_ENV[provider];
   const apiKey =
-    overrides.apiKey ?? stored.apiKey ?? process.env[API_KEY_ENV[provider]];
-  if (!apiKey) {
+    overrides.apiKey ??
+    stored.apiKey ??
+    (envKey ? process.env[envKey] : undefined);
+  if (!apiKey && provider !== "vertex") {
     throw new Error(`No API key found. Run: crack-code --setup`);
   }
 
@@ -384,7 +557,13 @@ export async function loadConfig(
   return {
     provider,
     model,
-    apiKey,
+    apiKey: apiKey ?? "",
+    resourceName: stored.resourceName ?? process.env.AZURE_RESOURCE_NAME,
+    project: stored.project ?? process.env.GOOGLE_CLOUD_PROJECT,
+    location:
+      stored.location ?? process.env.GOOGLE_CLOUD_LOCATION ?? "us-central1",
+    vertexClientEmail: stored.vertexClientEmail,
+    vertexPrivateKey: stored.vertexPrivateKey,
     maxTokens: overrides.maxTokens ?? 16384,
     maxSteps: overrides.maxSteps ?? 30,
     permissionPolicy: overrides.permissionPolicy ?? "ask",
