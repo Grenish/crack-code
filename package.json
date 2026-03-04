@@ -1,10 +1,54 @@
 {
   "name": "crack-code",
+  "version": "0.1.0",
+  "description": "AI-powered CLI security auditor that scans codebases for vulnerabilities, explains findings with exact code references, and optionally applies fixes. Provider-agnostic — works with Anthropic, OpenAI, Google, and Ollama.",
   "module": "src/index.ts",
+  "bin": {
+    "crack-code": "src/index.ts"
+  },
   "scripts": {
-    "dev": "bun run src/index.ts"
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "setup": "bun run src/index.ts --setup"
   },
   "type": "module",
+  "license": "MIT",
+  "author": "Grenish rai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/grenishrai/crack-code"
+  },
+  "homepage": "https://github.com/grenishrai/crack-code#readme",
+  "bugs": {
+    "url": "https://github.com/grenishrai/crack-code/issues"
+  },
+  "keywords": [
+    "security",
+    "vulnerability-scanner",
+    "code-audit",
+    "ai",
+    "cli",
+    "llm",
+    "anthropic",
+    "openai",
+    "google",
+    "ollama",
+    "static-analysis",
+    "pentesting",
+    "devtools",
+    "bun",
+    "ai-agent",
+    "code-review",
+    "sast"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "devDependencies": {
     "@types/bun": "latest",
     "@types/gradient-string": "^1.1.6"
