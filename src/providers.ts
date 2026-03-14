@@ -29,6 +29,16 @@ export function getModel(config: Config): LanguageModel {
     case "google":
       return createGoogleGenerativeAI({ apiKey })(model);
 
+    case "openrouter":
+      return createOpenAI({
+        apiKey,
+        baseURL: "https://openrouter.ai/api/v1",
+        headers: {
+          "HTTP-Referer": "https://github.com/grenishrai/crack-code",
+          "X-Title": "crack-code",
+        },
+      }).chat(model);
+
     case "ollama":
       // For ollama the "apiKey" field holds the endpoint URL
       return createOllama({ baseURL: apiKey || undefined })(model);

@@ -251,12 +251,9 @@ export async function startRepl(
               loading.stop();
               firstToken = false;
             }
-            ui.toolStart(name, args);
           },
 
-          onToolEnd: (name, result) => {
-            ui.toolEnd(name, result);
-          },
+          onToolEnd: (name, result) => {},
 
           onUsage: (usage) => {
             ctx.totalUsage.inputTokens += usage.inputTokens;

@@ -78,7 +78,7 @@ export class PermissionManager {
     ui.permissionPrompt(toolName, summary);
 
     const answer = await this.ask(
-      "\x1b[33m   [y]es / [n]o / [a]lways for this session: \x1b[0m",
+      "\x1b[90m│\x1b[0m\x1b[33m   [y]es / [n]o / [a]lways for this session:\x1b[0m ",
     );
 
     const choice = answer.toLowerCase();
@@ -113,15 +113,32 @@ export class PermissionManager {
   }
 
   private ask(question: string): Promise<string> {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
     return new Promise((resolve) => {
-      rl.question(question, (answer) => {
-        rl.close();
-        resolve(answer.trim());
-      });
+      process.stdout.write(question);
+
+      const onData = (data: Buffer) => {
+        const char = data.toString();
+
+        // Handle Ctrl+C
+        if (char === "\u0003") {
+          process.stdout.write("\n");
+          process.exit(0);
+        }
+
+        process.stdout.write(char + "\n");
+        if (process.stdin.isTTY) {
+          process.stdin.setRawMode(false);
+        }
+        process.stdin.pause();
+        process.stdin.removeListener("data", onData);
+        resolve(char.trim());
+      };
+
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+      }
+      process.stdin.resume();
+      process.stdin.on("data", onData);
     });
   }
 }

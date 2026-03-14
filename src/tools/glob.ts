@@ -59,7 +59,7 @@ export const listFilesTool: ToolDef<typeof schema> = {
         ? `Found ${MAX_RESULTS}+ files (showing first ${MAX_RESULTS}):`
         : `Found ${matches.length} file${matches.length === 1 ? "" : "s"}:`;
 
-    return `${header}\n\n${matches.join("\n")}`;
+    return `${header}\n${matches.join("\n")}`;
   },
 };
 

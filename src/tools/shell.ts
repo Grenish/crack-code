@@ -59,7 +59,7 @@ export const runCommandTool: ToolDef<typeof schema> = {
       if (stdout.trim()) parts.push(`stdout:\n${stdout.trim()}`);
       if (stderr.trim()) parts.push(`stderr:\n${stderr.trim()}`);
 
-      return parts.join("\n\n");
+      return parts.join("\n");
     } catch (err: any) {
       if (err.message?.includes("kill")) {
         return `Error: command timed out after ${timeout}ms — "${command}"`;

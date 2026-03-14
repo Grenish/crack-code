@@ -10,13 +10,21 @@ import { fetchGoogleModels } from "./providers/google";
 import { fetchOpenAIModels } from "./providers/openai";
 import { fetchOllamaModels } from "./providers/ollama";
 import { fetchVertexModels } from "./providers/vertex";
+import { fetchOpenRouterModels } from "./providers/openrouter";
 
 import * as readline from "node:readline";
 import { CrackCodeLogo } from "./logo/crack-code";
 import { pastel } from "gradient-string";
 
 export interface Config {
-  provider: "openai" | "google" | "anthropic" | "ollama" | "azure" | "vertex";
+  provider:
+    | "openai"
+    | "google"
+    | "anthropic"
+    | "ollama"
+    | "azure"
+    | "vertex"
+    | "openrouter";
   model: string;
   apiKey: string;
 
@@ -84,6 +92,7 @@ const PROVIDERS = [
   "azure",
   "google",
   "openai",
+  "openrouter",
   "ollama",
   "vertex",
 ] as const;
@@ -94,6 +103,7 @@ const API_KEY_ENV: Record<Config["provider"], string> = {
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
   ollama: "OLLAMA_ENDPOINT",
   openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
   vertex: "", // Vertex uses service account JSON — no single env key
 };
 
@@ -195,6 +205,8 @@ async function fetchModels(
         return await fetchGoogleModels(apiKey);
       case "openai":
         return await fetchOpenAIModels(apiKey);
+      case "openrouter":
+        return await fetchOpenRouterModels(apiKey);
       case "ollama":
         return await fetchOllamaModels(apiKey);
       case "vertex": {
