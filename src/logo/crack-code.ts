@@ -1,5 +1,5 @@
 export function CrackCodeLogo() {
-  const version = "0.1.1";
+  const version = "0.2.1";
 
   return String.raw`_________                       __     _________            .___
 \_   ___ \____________    ____ |  | __ \_   ___ \  ____   __| _/____
