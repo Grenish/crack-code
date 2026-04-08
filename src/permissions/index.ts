@@ -1,4 +1,3 @@
-import * as readline from "node:readline";
 import * as ui from "../ui/renderer.js";
 
 export type PermissionPolicy = "ask" | "skip" | "allow-all" | "deny-all";
@@ -41,7 +40,6 @@ export class PermissionManager {
         return true;
 
       case "ask":
-        // Check session memory before prompting
         if (this.isSessionApproved(toolName, input)) {
           return true;
         }
@@ -57,16 +55,16 @@ export class PermissionManager {
     toolName: string,
     input: Record<string, unknown>,
   ): boolean {
-    // Blanket tool approval (user chose "always")
     if (this.sessionApprovals.has(`tool:${toolName}`)) {
       return true;
     }
-    // Exact action approval (user chose "yes" for this specific call)
+
     if (
       this.sessionApprovals.has(`exact:${toolName}:${JSON.stringify(input)}`)
     ) {
       return true;
     }
+
     return false;
   }
 
@@ -77,25 +75,21 @@ export class PermissionManager {
     const summary = this.summarize(toolName, input);
     ui.permissionPrompt(toolName, summary);
 
-    const answer = await this.ask(
-      "\x1b[90m│\x1b[0m\x1b[33m   [y]es / [n]o / [a]lways for this session:\x1b[0m ",
+    const answer = await this.askChoice(
+      "\x1b[90m  ╰─\x1b[0m \x1b[33mChoose \x1b[32m[y]\x1b[33mes / \x1b[31m[n]\x1b[33mo / \x1b[36m[a]\x1b[33mlways:\x1b[0m ",
+      ["y", "n", "a"],
     );
 
-    const choice = answer.toLowerCase();
-
-    if (choice === "y" || choice === "yes") {
-      // Remember this exact action
+    if (answer === "y") {
       this.sessionApprovals.add(`exact:${toolName}:${JSON.stringify(input)}`);
       return true;
     }
 
-    if (choice === "a" || choice === "always") {
-      // Remember all future calls to this tool
+    if (answer === "a") {
       this.sessionApprovals.add(`tool:${toolName}`);
       return true;
     }
 
-    // Anything else is a deny — empty input, "n", "no", gibberish
     ui.toolBlocked(toolName, "Denied by user.");
     return false;
   }
@@ -106,39 +100,160 @@ export class PermissionManager {
         return `Write to ${input.path}`;
       case "run_command":
         return `$ ${input.command}`;
-      default:
+      default: {
         const preview = JSON.stringify(input);
         return preview.length > 150 ? preview.slice(0, 150) + "…" : preview;
+      }
     }
   }
 
-  private ask(question: string): Promise<string> {
-    return new Promise((resolve) => {
-      process.stdout.write(question);
+  private async askChoice(
+    question: string,
+    allowed: readonly string[],
+  ): Promise<string> {
+    const normalizedAllowed = new Set(allowed.map((v) => v.toLowerCase()));
+    const stdin = process.stdin;
+    const stdout = process.stdout;
 
-      const onData = (data: Buffer) => {
-        const char = data.toString();
+    const wasRaw = Boolean((stdin as any).isRaw);
+    const wasPaused = stdin.isPaused();
 
-        // Handle Ctrl+C
-        if (char === "\u0003") {
-          process.stdout.write("\n");
+    // Drain any pending buffered input (e.g., Enter from prior prompt)
+    try {
+      let drained = stdin.read();
+      while (drained !== null) {
+        drained = stdin.read();
+      }
+    } catch {
+      // no-op
+    }
+
+    return await new Promise<string>((resolve) => {
+      let done = false;
+      let buffer = "";
+
+      const cleanup = () => {
+        if (done) return;
+        done = true;
+
+        stdin.removeListener("data", onData);
+        stdin.removeListener("end", onEnd);
+        stdin.removeListener("error", onError);
+
+        if (stdin.isTTY) {
+          try {
+            stdin.setRawMode(wasRaw);
+          } catch {
+            // no-op
+          }
+        }
+
+        if (wasPaused) {
+          stdin.pause();
+        }
+      };
+
+      const finish = (value: string) => {
+        cleanup();
+        resolve(value);
+      };
+
+      const finalizeBuffer = () => {
+        const trimmed = buffer.trim().toLowerCase();
+        if (trimmed.length > 0) {
+          const first = trimmed[0]!;
+          if (normalizedAllowed.has(first)) {
+            stdout.write(`${first}\n`);
+            finish(first);
+            return;
+          }
+          if (trimmed === "yes" && normalizedAllowed.has("y")) {
+            stdout.write("y\n");
+            finish("y");
+            return;
+          }
+          if (trimmed === "no" && normalizedAllowed.has("n")) {
+            stdout.write("n\n");
+            finish("n");
+            return;
+          }
+          if (trimmed === "always" && normalizedAllowed.has("a")) {
+            stdout.write("a\n");
+            finish("a");
+            return;
+          }
+        }
+
+        stdout.write("n\n");
+        finish("n");
+      };
+
+      const onData = (chunk: Buffer | string) => {
+        const s = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+
+        // Ctrl+C
+        if (s.includes("\u0003")) {
+          stdout.write("\n");
+          cleanup();
           process.exit(0);
         }
 
-        process.stdout.write(char + "\n");
-        if (process.stdin.isTTY) {
-          process.stdin.setRawMode(false);
+        // In raw mode, single keypress should be handled once and immediately.
+        if (stdin.isTTY) {
+          const c = s.toLowerCase();
+
+          if (c === "y" || c === "n" || c === "a") {
+            stdout.write(`${c}\n`);
+            finish(c);
+            return;
+          }
+
+          if (c === "\r" || c === "\n") {
+            stdout.write("n\n");
+            finish("n");
+            return;
+          }
+
+          if (c === "\u007f" || c === "\b") {
+            // Ignore backspace in single-key mode.
+            return;
+          }
+
+          // Ignore other keys in raw mode.
+          return;
         }
-        process.stdin.pause();
-        process.stdin.removeListener("data", onData);
-        resolve(char.trim());
+
+        // Non-TTY fallback: buffered line input.
+        buffer += s;
+        if (s.includes("\n") || s.includes("\r")) {
+          finalizeBuffer();
+        }
       };
 
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(true);
+      const onEnd = () => {
+        stdout.write("\n");
+        finish("n");
+      };
+
+      const onError = () => {
+        stdout.write("\n");
+        finish("n");
+      };
+
+      stdout.write(question);
+
+      if (stdin.isTTY) {
+        try {
+          stdin.setRawMode(true);
+        } catch {
+          // Fall through; non-raw still works via data buffering path.
+        }
       }
-      process.stdin.resume();
-      process.stdin.on("data", onData);
+
+      stdin.resume();
+      stdin.on("data", onData);
+      stdin.once("end", onEnd);
+      stdin.once("error", onError);
     });
   }
 }
