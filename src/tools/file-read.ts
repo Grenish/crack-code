@@ -43,7 +43,7 @@ export const readFileTool: ToolDef<typeof schema> = {
       const truncated = partial.slice(0, MAX_SIZE);
       const lines = truncated.split("\n");
       return (
-        `⚠ File truncated (${(size / 1024).toFixed(0)} KB > 256 KB limit). Showing first ${lines.length} lines.\n\n` +
+        `⚠ File truncated (${(size / 1024).toFixed(0)} KB > 256 KB limit). Showing first ${lines.length} lines.\n` +
         numberLines(lines, 1)
       );
     }
@@ -65,7 +65,7 @@ export const readFileTool: ToolDef<typeof schema> = {
         ? `${rel} (lines ${start}–${end})`
         : `${rel} (${lines.length} lines)`;
 
-    return `${header}\n\n${numberLines(lines, start)}`;
+    return `${header}\n${numberLines(lines, start)}`;
   },
 };
 

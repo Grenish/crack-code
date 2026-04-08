@@ -1,7 +1,7 @@
 {
   "name": "crack-code",
   "version": "0.1.1",
-  "description": "AI-powered CLI security auditor that scans codebases for vulnerabilities, explains findings with exact code references, and optionally applies fixes. Provider-agnostic — works with Anthropic, OpenAI, Google, and Ollama.",
+  "description": "AI-powered CLI security auditor that scans codebases for vulnerabilities, explains findings with exact code references, and optionally applies fixes. Provider-agnostic — works with Anthropic, OpenAI, Google, Azure, Vertex AI, and Ollama.",
   "module": "src/index.ts",
   "bin": {
     "crack-code": "src/index.ts"
@@ -32,6 +32,8 @@
     "anthropic",
     "openai",
     "google",
+    "azure",
+    "vertex-ai",
     "ollama",
     "static-analysis",
     "pentesting",
@@ -58,8 +60,11 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.54",
+    "@ai-sdk/azure": "^3.0.40",
     "@ai-sdk/google": "^3.0.37",
+    "@ai-sdk/google-vertex": "^4.0.73",
     "@ai-sdk/openai": "^3.0.39",
+    "@clack/prompts": "^1.2.0",
     "ai": "^6.0.111",
     "gradient-string": "^3.0.0",
     "ollama-ai-provider-v2": "^3.3.1",

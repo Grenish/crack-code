@@ -1,6 +1,11 @@
 #!/usr/bin/env bun
 
-import { loadConfig, runSetup, type ConfigOverrides } from "./config.js";
+import {
+  isSetupCancelledError,
+  loadConfig,
+  runSetup,
+  type ConfigOverrides,
+} from "./config.js";
 import { getModel } from "./providers.js";
 import { ToolRegistry } from "./tools/registry.js";
 import {
@@ -11,35 +16,43 @@ import { readFileTool } from "./tools/file-read.js";
 import { writeFileTool } from "./tools/file-write.js";
 import { runCommandTool } from "./tools/shell.js";
 import { listFilesTool } from "./tools/glob.js";
+import { virtualTerminalTool } from "./tools/virtual-terminal.js";
 import { runAgent } from "./agent.js";
 import { startRepl } from "./repl.js";
 import * as ui from "./ui/renderer.js";
 
 // Version
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 // Help
 
 function printHelp(): void {
   console.log(`
-\x1b[1m\x1b[36m🔓 Crack Code\x1b[0m v${VERSION}
-AI-powered security auditor for your codebase.
+\x1b[1m\x1b[36mCrack Code\x1b[0m \x1b[90mv${VERSION}\x1b[0m
+AI-powered vulnerability scanning CLI for security-focused code review.
 
 \x1b[1mUsage:\x1b[0m
   crack-code [options] [prompt]
 
-\x1b[1mExamples:\x1b[0m
-  crack-code                                  Interactive REPL
-  crack-code "scan for vulnerabilities"       One-shot scan
-  crack-code "check src/auth/ for flaws"      Scan specific area
-  crack-code --allow-edits "fix SQL injection in src/db.ts"
+\x1b[1mCommon workflows:\x1b[0m
+  crack-code
+      Launch the interactive security TUI
+
+  crack-code "scan for vulnerabilities"
+      Run a one-shot audit over the current codebase
+
+  crack-code --scan "src/auth/**/*.ts" "check for auth flaws"
+      Focus the scan on a high-risk area
+
+  crack-code --allow-edits "fix the unsafe shell command usage"
+      Allow the agent to propose and apply remediations
 
 \x1b[1mOptions:\x1b[0m
-  -i, --interactive          Force interactive REPL mode
-  --setup                    Re-run first-time setup wizard
+  -i, --interactive          Force interactive TUI mode
+  --setup                    Open the provider and model setup wizard
   --allow-edits              Enable file writing (read-only by default)
-  --provider <name>          Override provider (anthropic, openai, google)
+  --provider <name>          Override provider (anthropic, azure, google, openai, openrouter, ollama, vertex)
   --model <name>             Override model
   --key <key>                Override API key
   --policy <policy>          Permission policy (ask, skip, allow-all, deny-all)
@@ -49,7 +62,7 @@ AI-powered security auditor for your codebase.
   -h, --help                 Show this help
   -v, --version              Show version
 
-\x1b[1mREPL Commands:\x1b[0m
+\x1b[1mInteractive commands:\x1b[0m
   /help       Show commands        /clear      Clear history
   /exit       Exit                 /mode       Toggle edit mode
   /usage      Token usage          /model      Show model info
@@ -124,6 +137,9 @@ function registerTools(allowEdits: boolean): ToolRegistry {
   // Shell is always available but goes through permission gate
   tools.register(runCommandTool);
 
+  // Virtual terminal — persistent context across commands
+  tools.register(virtualTerminalTool);
+
   // Write tools only when edits are enabled
   if (allowEdits) {
     tools.register(writeFileTool);
@@ -150,8 +166,16 @@ async function main(): Promise<void> {
   }
 
   if (flags.setup) {
-    await runSetup();
-    process.exit(0);
+    try {
+      await runSetup();
+      process.exit(0);
+    } catch (e: any) {
+      if (isSetupCancelledError(e)) {
+        process.exit(0);
+      }
+      ui.error(e.message);
+      process.exit(1);
+    }
   }
 
   // Build config overrides from flags
@@ -180,6 +204,9 @@ async function main(): Promise<void> {
   try {
     config = await loadConfig(overrides);
   } catch (e: any) {
+    if (isSetupCancelledError(e)) {
+      process.exit(0);
+    }
     ui.error(e.message);
     process.exit(1);
   }
@@ -188,7 +215,7 @@ async function main(): Promise<void> {
 
   let model;
   try {
-    model = getModel(config.provider, config.model, config.apiKey);
+    model = getModel(config);
   } catch (e: any) {
     ui.error(e.message);
     process.exit(1);

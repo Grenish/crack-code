@@ -1,9 +1,14 @@
+import { CrackCodeLogo } from "../logo/crack-code.js";
+
+// ─── ANSI Color Palette ─────────────────────────────────────────────
+
 const C = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
   italic: "\x1b[3m",
   under: "\x1b[4m",
+  strike: "\x1b[9m",
 
   red: "\x1b[31m",
   green: "\x1b[32m",
@@ -15,10 +20,16 @@ const C = {
   gray: "\x1b[90m",
 
   bgRed: "\x1b[41m",
+  bgGreen: "\x1b[42m",
   bgYellow: "\x1b[43m",
+  bgBlue: "\x1b[44m",
+  bgMagenta: "\x1b[45m",
   bgCyan: "\x1b[46m",
   bgGray: "\x1b[100m",
 } as const;
+
+const APP_VERSION = "0.1.1";
+const MAX_SURFACE_WIDTH = 118;
 
 type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
 
@@ -42,56 +53,488 @@ const SEVERITY_STYLE: Record<Severity, { badge: string; color: string }> = {
   INFO: { badge: `${C.dim} INFO ${C.reset}`, color: C.gray },
 };
 
-// --- Core Output ---
+let activeSpinner: SpinnerHandle | null = null;
+
+// ─── Streaming Markdown State ───────────────────────────────────────
+
+// Code fence state
+let inCodeBlock = false;
+let codeFenceLang = "";
+let codeFenceOpening = false; // true while collecting language after opening ```
+
+// Line-level state
+let lineBuffer = "";
+let atLineStart = true; // true when we're at col 0 of a new line
+
+// Inline state — tracks pending marker characters for bold/italic/code
+let pendingBackticks = 0;
+
+// ─── Streaming Markdown Renderer ────────────────────────────────────
+//
+// Design: We accumulate text character-by-character. When we're inside
+// a code fence we emit raw cyan text. Outside code fences we buffer
+// each line and, at newline boundaries, apply:
+//   1. Block-level decoration  (headings, lists, blockquotes, HRs)
+//   2. Inline formatting       (bold, italic, inline code, strikethrough)
+//
+// This gives us the best fidelity we can get while keeping the streaming
+// feel — block decorations appear as soon as the newline arrives, and
+// inline formatting is applied per-line.
 
 export function streamText(chunk: string): void {
-  process.stdout.write(chunk);
+  if (activeSpinner) activeSpinner.stop();
+
+  for (let i = 0; i < chunk.length; i++) {
+    const char = chunk[i]!;
+
+    // ── Code fence detection ─────────────────────────────
+    if (char === "`") {
+      pendingBackticks++;
+
+      // Once we hit 3 backticks, toggle code block mode
+      if (pendingBackticks === 3) {
+        pendingBackticks = 0;
+
+        if (!inCodeBlock) {
+          // Opening fence — start collecting the language tag
+          inCodeBlock = true;
+          codeFenceLang = "";
+          codeFenceOpening = true;
+          // Flush any buffered line content before the fence
+          if (lineBuffer.length > 0) {
+            emitFormattedLine(lineBuffer);
+            lineBuffer = "";
+          }
+        } else {
+          // Closing fence
+          inCodeBlock = false;
+          codeFenceOpening = false;
+          process.stdout.write(
+            `${C.reset}\n${C.gray}  ╰${"─".repeat(48)}${C.reset}\n`,
+          );
+          atLineStart = true;
+          lineBuffer = "";
+        }
+      }
+      continue;
+    }
+
+    // If we had 1 or 2 pending backticks that didn't become 3, flush them
+    if (pendingBackticks > 0) {
+      const ticks = "`".repeat(pendingBackticks);
+      pendingBackticks = 0;
+
+      if (inCodeBlock) {
+        process.stdout.write(ticks);
+      } else {
+        lineBuffer += ticks;
+        atLineStart = false;
+      }
+    }
+
+    // ── Inside a code fence ──────────────────────────────
+    if (inCodeBlock) {
+      if (codeFenceOpening) {
+        // Still on the opening line — collect language tag until newline
+        if (char === "\n") {
+          codeFenceOpening = false;
+          const lang = codeFenceLang.trim();
+          const label = lang || "code";
+          process.stdout.write(
+            `\n${C.gray}  ╭─ ${C.cyan}${C.bold}${label}${C.reset}${C.gray} ${"─".repeat(Math.max(0, 44 - label.length))}${C.reset}\n`,
+          );
+          atLineStart = true;
+        } else {
+          codeFenceLang += char;
+        }
+        continue;
+      }
+
+      // Normal code content
+      if (char === "\n") {
+        process.stdout.write("\n");
+        atLineStart = true;
+      } else {
+        if (atLineStart) {
+          process.stdout.write(`${C.gray}  │${C.reset} ${C.cyan}`);
+          atLineStart = false;
+        }
+        process.stdout.write(char);
+      }
+      continue;
+    }
+
+    // ── Outside code fences — buffer until newline ───────
+    if (char === "\n") {
+      emitFormattedLine(lineBuffer);
+      lineBuffer = "";
+      atLineStart = true;
+    } else {
+      lineBuffer += char;
+      atLineStart = false;
+    }
+  }
+}
+
+// ─── Line-Level Formatting ──────────────────────────────────────────
+
+function emitFormattedLine(raw: string): void {
+  const trimmed = raw.trimStart();
+  const indent = raw.length - trimmed.length;
+  const pad = " ".repeat(indent);
+
+  // ── Horizontal rule ──
+  if (/^[-*_]{3,}\s*$/.test(trimmed)) {
+    process.stdout.write(`\n${C.gray}  ${"─".repeat(50)}${C.reset}\n`);
+    return;
+  }
+
+  // ── Headings ──
+  const headingMatch = trimmed.match(/^(#{1,6})\s+(.*)/);
+  if (headingMatch) {
+    const level = headingMatch[1]!.length;
+    const text = headingMatch[2]!;
+    const formatted = applyInlineFormatting(text);
+
+    if (level === 1) {
+      process.stdout.write(
+        `\n${pad}${C.bold}${C.magenta}█ ${formatted}${C.reset}\n`,
+      );
+    } else if (level === 2) {
+      process.stdout.write(
+        `\n${pad}${C.bold}${C.blue}■ ${formatted}${C.reset}\n`,
+      );
+    } else if (level === 3) {
+      process.stdout.write(
+        `\n${pad}${C.bold}${C.cyan}▸ ${formatted}${C.reset}\n`,
+      );
+    } else {
+      process.stdout.write(
+        `\n${pad}${C.bold}${C.white}${"▸".repeat(level - 2)} ${formatted}${C.reset}\n`,
+      );
+    }
+    return;
+  }
+
+  // ── Blockquote ──
+  const blockquoteMatch = trimmed.match(/^>\s?(.*)/);
+  if (blockquoteMatch) {
+    const text = blockquoteMatch[1]!;
+    const formatted = applyInlineFormatting(text);
+    process.stdout.write(
+      `${pad}${C.gray}  ┃${C.reset} ${C.italic}${C.white}${formatted}${C.reset}\n`,
+    );
+    return;
+  }
+
+  // ── Checkbox (task list) — must come before unordered list ──
+  const checkMatch = trimmed.match(/^[-*+]\s+\[([ xX])\]\s+(.*)/);
+  if (checkMatch) {
+    const checked = checkMatch[1] !== " ";
+    const text = checkMatch[2]!;
+    const formatted = applyInlineFormatting(text);
+    const box = checked ? `${C.green}☑${C.reset}` : `${C.gray}☐${C.reset}`;
+    process.stdout.write(`${pad}  ${box} ${formatted}${C.reset}\n`);
+    return;
+  }
+
+  // ── Unordered list ──
+  const ulMatch = trimmed.match(/^[-*+]\s+(.*)/);
+  if (ulMatch) {
+    const text = ulMatch[1]!;
+    const formatted = applyInlineFormatting(text);
+    process.stdout.write(
+      `${pad}  ${C.cyan}•${C.reset} ${formatted}${C.reset}\n`,
+    );
+    return;
+  }
+
+  // ── Ordered list ──
+  const olMatch = trimmed.match(/^(\d+)[.)]\s+(.*)/);
+  if (olMatch) {
+    const num = olMatch[1]!;
+    const text = olMatch[2]!;
+    const formatted = applyInlineFormatting(text);
+    process.stdout.write(
+      `${pad}  ${C.cyan}${num}.${C.reset} ${formatted}${C.reset}\n`,
+    );
+    return;
+  }
+
+  // ── Normal paragraph line ──
+  const formatted = applyInlineFormatting(raw);
+  process.stdout.write(`${formatted}${C.reset}\n`);
+}
+
+// ─── Inline Formatting ──────────────────────────────────────────────
+//
+// Applies bold, italic, inline code, and strikethrough to a single
+// line of text. Works by scanning through the string and matching
+// Markdown markers. We process in priority order:
+//   1. Inline code (backticks)  — highest priority, no nesting
+//   2. Bold + italic (***…***)
+//   3. Bold (**…**)
+//   4. Italic (*…* or _…_)
+//   5. Strikethrough (~~…~~)
+
+function applyInlineFormatting(text: string): string {
+  // Pass 1: Protect inline code spans (no formatting inside them)
+  const codeSpans: string[] = [];
+  let processed = text.replace(/`([^`]+)`/g, (_match, code: string) => {
+    const idx = codeSpans.length;
+    codeSpans.push(code);
+    return `\x00CODE${idx}\x00`;
+  });
+
+  // Pass 2: Bold + italic
+  processed = processed.replace(
+    /\*\*\*(.+?)\*\*\*/g,
+    `${C.bold}${C.italic}${C.white}$1${C.reset}`,
+  );
+
+  // Pass 3: Bold
+  processed = processed.replace(
+    /\*\*(.+?)\*\*/g,
+    `${C.bold}${C.white}$1${C.reset}`,
+  );
+  processed = processed.replace(
+    /__(.+?)__/g,
+    `${C.bold}${C.white}$1${C.reset}`,
+  );
+
+  // Pass 4: Italic
+  processed = processed.replace(
+    /\*(.+?)\*/g,
+    `${C.italic}${C.white}$1${C.reset}`,
+  );
+  processed = processed.replace(
+    /_(.+?)_/g,
+    `${C.italic}${C.white}$1${C.reset}`,
+  );
+
+  // Pass 5: Strikethrough
+  processed = processed.replace(
+    /~~(.+?)~~/g,
+    `${C.dim}${C.strike}$1${C.reset}`,
+  );
+
+  // Pass 6: Links [text](url) — show text in underline, URL dimmed
+  processed = processed.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    `${C.under}${C.cyan}$1${C.reset}${C.gray} ($2)${C.reset}`,
+  );
+
+  // Restore inline code spans
+  processed = processed.replace(/\x00CODE(\d+)\x00/g, (_match, idx: string) => {
+    const code = codeSpans[parseInt(idx, 10)] ?? "";
+    return `${C.bgGray}${C.white} ${code} ${C.reset}`;
+  });
+
+  return processed;
+}
+
+// ─── Lifecycle ──────────────────────────────────────────────────────
+
+export function resetStreamState(): void {
+  inCodeBlock = false;
+  codeFenceLang = "";
+  codeFenceOpening = false;
+  lineBuffer = "";
+  atLineStart = true;
+  pendingBackticks = 0;
+}
+
+export function flushStream(): void {
+  // Flush any remaining pending ticks
+  if (pendingBackticks > 0) {
+    if (inCodeBlock) {
+      process.stdout.write("`".repeat(pendingBackticks));
+    } else {
+      lineBuffer += "`".repeat(pendingBackticks);
+    }
+    pendingBackticks = 0;
+  }
+
+  // Flush remaining line buffer
+  if (lineBuffer.length > 0) {
+    emitFormattedLine(lineBuffer);
+    lineBuffer = "";
+  }
+
+  // If we're stuck inside a code block (malformed markdown), close it
+  if (inCodeBlock) {
+    process.stdout.write(
+      `${C.reset}\n${C.gray}  ╰${"─".repeat(48)}${C.reset}\n`,
+    );
+    inCodeBlock = false;
+  }
+
+  atLineStart = true;
 }
 
 export function newline(): void {
+  if (activeSpinner) activeSpinner.stop();
+  flushStream();
   process.stdout.write("\n");
+  resetStreamState();
 }
 
 export function clearLine(): void {
+  if (activeSpinner) activeSpinner.stop();
   process.stdout.write("\r\x1b[K");
 }
 
-// --- Tool Calls ---
+// ─── Layout Helpers ─────────────────────────────────────────────────
 
-export function toolStart(name: string, args?: unknown): void {
-  const summary = args ? truncate(formatArgs(name, args), 100) : "";
-  process.stdout.write(
-    `\n${C.gray}╭─ ${C.cyan}${C.bold}${name}${C.reset}${summary ? ` ${C.gray}${summary}` : ""}${C.reset}\n`,
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleLength(text: string): number {
+  return stripAnsi(text).length;
+}
+
+function padVisible(text: string, width: number): string {
+  const pad = Math.max(0, width - visibleLength(text));
+  return text + " ".repeat(pad);
+}
+
+function truncateVisible(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (visibleLength(text) <= width) return text;
+
+  let out = "";
+  let visible = 0;
+  let i = 0;
+
+  while (i < text.length && visible < Math.max(0, width - 1)) {
+    if (text[i] === "\x1b") {
+      const match = text.slice(i).match(/^\x1b\[[0-9;]*m/);
+      if (match) {
+        out += match[0];
+        i += match[0].length;
+        continue;
+      }
+    }
+
+    out += text[i]!;
+    visible++;
+    i++;
+  }
+
+  return out + "…";
+}
+
+function normalizeCell(text: string, width: number): string {
+  return padVisible(truncateVisible(text, width), width);
+}
+
+function termWidth(): number {
+  return Math.max(80, Math.min(process.stdout.columns || 120, 160));
+}
+
+function panelWidth(): number {
+  return Math.max(
+    68,
+    Math.min((process.stdout.columns || 120) - 2, MAX_SURFACE_WIDTH),
   );
 }
 
-export function toolEnd(name: string, result: string): void {
-  const lines = result.split("\n");
-  const maxPreview = 6;
-  const preview = lines.slice(0, maxPreview);
+function rule(width = panelWidth()): string {
+  return `${C.gray}${"─".repeat(width)}${C.reset}`;
+}
 
-  for (const line of preview) {
-    process.stdout.write(`${C.gray}│${C.reset} ${line}\n`);
-  }
+function boxedSection(
+  title: string,
+  lines: string[],
+  width = panelWidth(),
+  accent: keyof typeof C = "cyan",
+): string[] {
+  const boxWidth = Math.max(24, width);
+  const inner = Math.max(16, boxWidth - 4);
+  const topPrefix = `${C.gray}╭─ ${C.reset}${C[accent]}${C.bold}${title}${C.reset}${C.gray} `;
+  const topFill = "─".repeat(
+    Math.max(0, boxWidth - visibleLength(topPrefix) - 1),
+  );
+  const out = [`${topPrefix}${topFill}╮${C.reset}`];
 
-  if (lines.length > maxPreview) {
-    process.stdout.write(
-      `${C.gray}│ ... ${lines.length - maxPreview} more lines${C.reset}\n`,
+  for (const line of lines) {
+    out.push(
+      `${C.gray}│ ${C.reset}${normalizeCell(line, inner)}${C.gray} │${C.reset}`,
     );
   }
 
-  process.stdout.write(`${C.gray}╰─ done${C.reset}\n\n`);
+  out.push(`${C.gray}╰${"─".repeat(boxWidth - 2)}╯${C.reset}`);
+  return out;
+}
+
+function joinColumns(left: string[], right: string[], gap = "  "): string[] {
+  const leftWidth = Math.max(...left.map((l) => visibleLength(l)), 0);
+  const rows = Math.max(left.length, right.length);
+  const out: string[] = [];
+
+  for (let i = 0; i < rows; i++) {
+    const l = left[i] ?? "";
+    const r = right[i] ?? "";
+    out.push(`${padVisible(l, leftWidth)}${gap}${r}`);
+  }
+
+  return out;
+}
+
+function compactPath(cwd: string): string {
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 3) return cwd;
+  return `…/${parts.slice(-3).join("/")}`;
+}
+
+// ─── Tool Call UI ───────────────────────────────────────────────────
+
+export function toolStart(name: string, args?: unknown): void {
+  if (activeSpinner) activeSpinner.stop();
+
+  const width = panelWidth();
+  const summary = composeToolStartSummary(name, args);
+  const line = truncateVisible(
+    `${C.cyan}${C.bold}◆${C.reset} ${C.white}${name}${C.reset} ${C.dim}${summary}${C.reset}`,
+    width,
+  );
+
+  process.stdout.write(`${line}\n`);
+}
+
+export function toolEnd(name: string, result: string): void {
+  if (activeSpinner) activeSpinner.stop();
+
+  const width = panelWidth();
+  const lines = summarizeToolResult(name, result, Math.max(20, width - 4));
+
+  const done = truncateVisible(
+    `${C.green}${C.bold}✓${C.reset} ${C.white}${name}${C.reset} ${C.dim}completed${C.reset}`,
+    width,
+  );
+  process.stdout.write(`${done}\n`);
+
+  for (const line of lines) {
+    process.stdout.write(`${truncateVisible(line, width)}\n`);
+  }
+
+  process.stdout.write("\n");
 }
 
 export function toolBlocked(name: string, reason: string): void {
-  process.stdout.write(`\n${C.gray}╭─ ${C.red}${name}${C.reset}\n`);
-  process.stdout.write(`${C.gray}│${C.reset} ${C.red}⛔ ${reason}${C.reset}\n`);
-  process.stdout.write(`${C.gray}╰─${C.reset}\n\n`);
+  if (activeSpinner) activeSpinner.stop();
+  process.stdout.write(`\n${C.gray}  ╭─ ${C.red}${name}${C.reset}\n`);
+  process.stdout.write(
+    `${C.gray}  │${C.reset} ${C.red}⛔ ${reason}${C.reset}\n`,
+  );
+  process.stdout.write(`${C.gray}  ╰─${C.reset}\n\n`);
 }
 
-// --- Severity ---
+// ─── Severity ───────────────────────────────────────────────────────
 
 export function severity(level: string): void {
+  if (activeSpinner) activeSpinner.stop();
   const key = level.toUpperCase() as Severity;
   const style = SEVERITY_STYLE[key];
   if (style) {
@@ -101,7 +544,7 @@ export function severity(level: string): void {
   }
 }
 
-// --- Spinner ---
+// ─── Spinner ────────────────────────────────────────────────────────
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -111,6 +554,8 @@ export interface SpinnerHandle {
 }
 
 export function spinner(text: string): SpinnerHandle {
+  if (activeSpinner) activeSpinner.stop();
+
   let i = 0;
   let current = text;
 
@@ -121,68 +566,233 @@ export function spinner(text: string): SpinnerHandle {
     );
   }, 80);
 
-  return {
+  const handle: SpinnerHandle = {
     update(newText: string) {
       current = newText;
     },
     stop() {
       clearInterval(id);
       process.stdout.write("\r\x1b[K");
+      if (activeSpinner === handle) activeSpinner = null;
     },
+  };
+
+  activeSpinner = handle;
+  return handle;
+}
+
+// ─── Prompts ────────────────────────────────────────────────────────
+
+export interface PromptFrameState {
+  cwd: string;
+  modelLabel: string;
+  input: string;
+  cursor: number;
+  placeholder: string;
+  footer: string;
+  isHome?: boolean;
+}
+
+export interface PromptFrameRender {
+  cursorCol: number;
+  lines: string[];
+}
+
+function composePromptFrameTop(
+  cwd: string,
+  modelLabel: string,
+  width: number,
+  isHome: boolean,
+): string {
+  const maxModel = Math.max(12, Math.floor(width * 0.34));
+  const rightPlain = truncate(modelLabel, maxModel);
+  const homeTag = isHome ? " [home]" : "";
+  const maxCwd = Math.max(14, width - rightPlain.length - 12);
+  const leftPlain = truncate(`${compactPath(cwd)}${homeTag}`, maxCwd);
+
+  const prefix = `${C.gray}╭─ ${C.reset}`;
+  const suffix = `${C.gray} ─╮${C.reset}`;
+  const left = isHome
+    ? `${C.yellow}${leftPlain}${C.reset}`
+    : `${C.white}${leftPlain}${C.reset}`;
+  const right = `${C.magenta}${rightPlain}${C.reset}`;
+  const fill = "─".repeat(
+    Math.max(
+      1,
+      width - visibleLength(prefix) - visibleLength(suffix) - leftPlain.length - rightPlain.length,
+    ),
+  );
+
+  return `${prefix}${left}${C.gray}${fill}${C.reset}${right}${suffix}`;
+}
+
+function composePromptFrameBottom(footer: string, width: number): string {
+  const prefix = `${C.gray}╰─ ${C.reset}`;
+  const suffix = `${C.gray} ─╯${C.reset}`;
+  const captionPlain = truncate(footer, Math.max(18, width - 10));
+  const caption = `${C.dim}${captionPlain}${C.reset}`;
+  const fill = "─".repeat(
+    Math.max(
+      1,
+      width - visibleLength(prefix) - visibleLength(suffix) - captionPlain.length,
+    ),
+  );
+
+  return `${prefix}${caption}${C.gray}${fill}${suffix}`;
+}
+
+export function renderPromptFrame(
+  state: PromptFrameState,
+): PromptFrameRender {
+  const width = panelWidth();
+  const inner = Math.max(20, width - 4);
+  const prompt = `${C.bold}${C.cyan}❯${C.reset} `;
+  const promptVisible = visibleLength(prompt);
+  const inputWidth = Math.max(10, inner - promptVisible);
+  const input = state.input;
+
+  let displayStart = 0;
+  if (input.length > inputWidth) {
+    if (state.cursor <= inputWidth) {
+      displayStart = 0;
+    } else if (state.cursor >= input.length - 1) {
+      displayStart = input.length - inputWidth;
+    } else {
+      displayStart = Math.max(0, state.cursor - Math.floor(inputWidth / 2));
+      if (displayStart + inputWidth > input.length) {
+        displayStart = input.length - inputWidth;
+      }
+    }
+  }
+
+  const visibleInput =
+    input.length > 0
+      ? input.slice(displayStart, displayStart + inputWidth)
+      : state.placeholder;
+  const content =
+    input.length > 0
+      ? visibleInput
+      : `${C.dim}${truncate(state.placeholder, inputWidth)}${C.reset}`;
+
+  const lines = [
+    composePromptFrameTop(
+      state.cwd,
+      state.modelLabel,
+      width,
+      Boolean(state.isHome),
+    ),
+    `${C.gray}│ ${C.reset}${prompt}${padVisible(content, inputWidth)}${C.gray} │${C.reset}`,
+    composePromptFrameBottom(state.footer, width),
+  ];
+
+  return {
+    lines,
+    cursorCol: 2 + promptVisible + Math.max(0, state.cursor - displayStart),
   };
 }
 
-// --- Prompts ---
+export function userPrompt(inputPreview = ""): void {
+  if (activeSpinner) activeSpinner.stop();
 
-export function userPrompt(): void {
-  process.stdout.write(`\n${C.bold}${C.blue}❯${C.reset} `);
+  const frame = renderPromptFrame({
+    cwd: process.cwd(),
+    modelLabel: "model",
+    input: inputPreview,
+    cursor: inputPreview.length,
+    placeholder: "Describe a scan target or threat to review",
+    footer: "/ commands • ? quick ask",
+  });
+  process.stdout.write(`${frame.lines.join("\n")}\n`);
 }
 
 export function permissionPrompt(name: string, summary: string): void {
+  if (activeSpinner) activeSpinner.stop();
+
+  const lines = [
+    `${C.yellow}Permission required${C.reset}`,
+    `Tool   ${C.white}${name}${C.reset}`,
+    summary
+      ? `Action ${C.dim}${summary}${C.reset}`
+      : `${C.dim}Awaiting confirmation for privileged action${C.reset}`,
+    `${C.dim}Choose:${C.reset} ${C.green}y${C.reset}=yes  ${C.red}n${C.reset}=no  ${C.yellow}a${C.reset}=always for this session`,
+  ];
+
   process.stdout.write(
-    `\n${C.yellow}⚠  Allow ${C.bold}${name}${C.reset}${C.yellow}?${C.reset}\n`,
+    `\n${boxedSection("Approval", lines, panelWidth(), "yellow").join("\n")}\n`,
   );
-  process.stdout.write(`${C.gray}   ${summary}${C.reset}\n`);
 }
 
-// --- Status ---
+// ─── Status Messages ───────────────────────────────────────────────
 
 export function info(msg: string): void {
-  console.log(`${C.gray}${msg}${C.reset}`);
+  if (activeSpinner) activeSpinner.stop();
+  console.log(`${C.cyan}ℹ${C.reset} ${C.gray}${msg}${C.reset}`);
 }
 
 export function success(msg: string): void {
-  console.log(`${C.green}✓ ${msg}${C.reset}`);
+  if (activeSpinner) activeSpinner.stop();
+  console.log(`${C.green}✓${C.reset} ${msg}`);
 }
 
 export function warn(msg: string): void {
-  console.log(`${C.yellow}⚠ ${msg}${C.reset}`);
+  if (activeSpinner) activeSpinner.stop();
+  console.log(`${C.yellow}⚠${C.reset} ${C.yellow}${msg}${C.reset}`);
 }
 
 export function error(msg: string): void {
+  if (activeSpinner) activeSpinner.stop();
   console.error(`${C.red}✗ ${msg}${C.reset}`);
 }
 
 export function dim(msg: string): void {
+  if (activeSpinner) activeSpinner.stop();
   console.log(`${C.gray}${msg}${C.reset}`);
 }
 
-// --- Banner ---
+// ─── Banner ─────────────────────────────────────────────────────────
 
-export function banner(model: string, mode: string): void {
+export interface BannerState {
+  gitBranch?: string | null;
+  host: string;
+  osUser: string;
+  userName?: string;
+}
+
+export function banner(state: BannerState): void {
+  if (activeSpinner) activeSpinner.stop();
+
+  const width = panelWidth();
+  const logoLines = CrackCodeLogo()
+    .trim()
+    .split("\n")
+    .map((line) => `${C.cyan}${line}${C.reset}`);
+  const gitLabel = state.gitBranch
+    ? `${C.green}yes${C.reset} ${C.white}(${state.gitBranch})${C.reset}`
+    : `${C.dim}no${C.reset}`;
+  const identity = truncateVisible(
+    `${C.gray}host${C.reset} ${C.white}${state.host}${C.reset} ${C.gray}:${C.reset} ${C.cyan}${state.osUser}${C.reset}   ${C.gray}git${C.reset} ${gitLabel}   ${C.dim}v${APP_VERSION}${C.reset}`,
+    width,
+  );
+  const greetingName = state.userName?.trim() || state.osUser;
+  const greeting = truncateVisible(
+    `${C.bold}${C.white}Hello ${greetingName}, what are we cracking today?${C.reset}`,
+    width,
+  );
+  const subtitle = truncateVisible(
+    `${C.dim}Security review shell for vulnerabilities, exploit paths, and remediations.${C.reset}`,
+    width,
+  );
+
   console.log();
-  console.log(`${C.bold}${C.cyan}Crack Code${C.reset}`);
-  console.log(`${C.gray}  Model: ${C.white}${model}${C.reset}`);
-  console.log(
-    `${C.gray}  Mode:  ${mode === "read-only" ? `${C.green}read-only` : `${C.yellow}edits enabled`}${C.reset}`,
-  );
-  console.log(
-    `${C.gray}  Type ${C.white}/help${C.gray} for commands, ${C.white}/exit${C.gray} to quit${C.reset}`,
-  );
+  for (const line of logoLines) console.log(line);
+  console.log();
+  console.log(identity);
+  console.log(greeting);
+  console.log(subtitle);
   console.log();
 }
 
-// --- Helpers ---
+// ─── Helpers ────────────────────────────────────────────────────────
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
@@ -205,4 +815,91 @@ function formatArgs(toolName: string, args: unknown): string {
     default:
       return truncate(JSON.stringify(args), 100);
   }
+}
+
+function composeToolStartSummary(name: string, args?: unknown): string {
+  const summary = args ? formatArgs(name, args) : "";
+  if (!summary) return "preparing";
+
+  switch (name) {
+    case "list_files":
+      return `list ${truncate(summary, 80)}`;
+    case "read_file":
+      return `read ${truncate(summary, 80)}`;
+    case "write_file":
+      return `write ${truncate(summary, 80)}`;
+    case "run_command":
+      return `run ${truncate(summary, 80)}`;
+    default:
+      return truncate(summary, 80);
+  }
+}
+
+function summarizeToolResult(
+  name: string,
+  result: string,
+  width: number,
+): string[] {
+  const clean = result.replace(/\r/g, "");
+  const lines = clean.split("\n").filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return [`${C.dim}no output${C.reset}`];
+  }
+
+  if (name === "list_files") {
+    const header =
+      lines.find((line) => /^Found\s+\d+/.test(line)) ??
+      lines.find((line) => /No files matched/.test(line)) ??
+      lines[0]!;
+    const fileLines = lines.filter(
+      (line) =>
+        !/^Found\s+\d+/.test(line) &&
+        !/^No files matched/.test(line) &&
+        !/^Error:/.test(line),
+    );
+    const preview = fileLines
+      .slice(0, 4)
+      .map(
+        (line) =>
+          `${C.gray}•${C.reset} ${truncate(line, Math.max(20, width - 4))}`,
+      );
+    const more =
+      fileLines.length > 4
+        ? [`${C.dim}… ${fileLines.length - 4} more${C.reset}`]
+        : [];
+
+    return [
+      `${C.white}${truncate(header, width)}${C.reset}`,
+      ...preview,
+      ...more,
+    ];
+  }
+
+  if (name === "read_file") {
+    const header = lines[0] ?? "File read complete";
+    const numbered = lines.filter((line) => /^\s*\d+\s*[│|]/.test(line));
+    const preview = numbered
+      .slice(0, 4)
+      .map((line) => `${C.gray}${truncate(line, width)}${C.reset}`);
+
+    const headerMore = lines.find((line) => /more lines|truncated/i.test(line));
+    const extra =
+      headerMore ??
+      (numbered.length > 4 ? `… ${numbered.length - 4} more lines` : "");
+
+    return [
+      `${C.white}${truncate(header, width)}${C.reset}`,
+      ...(preview.length > 0
+        ? preview
+        : [`${C.dim}preview unavailable${C.reset}`]),
+      ...(extra ? [`${C.dim}${truncate(extra, width)}${C.reset}`] : []),
+    ];
+  }
+
+  const preview = lines.slice(0, 4).map((line) => truncate(line, width));
+  const more =
+    lines.length > 4 ? [`${C.dim}… ${lines.length - 4} more${C.reset}`] : [];
+
+  return [...preview, ...more];
 }
