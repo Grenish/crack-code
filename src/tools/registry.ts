@@ -1,7 +1,6 @@
 import type { ToolSet } from "ai";
 import type { z } from "zod";
 import type { PermissionManager } from "../permissions/index.js";
-import * as ui from "../ui/renderer.js";
 
 // Each tool module exports one of these
 export interface ToolDef<
@@ -34,8 +33,6 @@ export class ToolRegistry {
         description: def.description,
         inputSchema: def.inputSchema,
         execute: async (input: Record<string, unknown>) => {
-          ui.toolStart(def.name, input);
-
           if (def.requiresApproval) {
             const allowed = await permissions.check(def.name, input);
             if (!allowed) return "⛔ Tool call denied by user.";
@@ -43,11 +40,9 @@ export class ToolRegistry {
 
           try {
             const result = await def.execute(input);
-            ui.toolEnd(def.name, result);
             return result;
           } catch (err: any) {
             const msg = `Error: ${err.message ?? err}`;
-            ui.toolEnd(def.name, msg);
             return msg;
           }
         },
