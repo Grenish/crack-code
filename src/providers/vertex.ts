@@ -3,30 +3,26 @@ import crypto from "node:crypto";
 
 // Vertex AI authenticates via a Google Cloud service account.
 // We use the client_email and private_key from the service account JSON
-// to mint a short-lived access token, then validate credentials with a
-// lightweight API call.
-//
-// There is no public "list all publisher models" REST endpoint on Vertex AI,
-// so we return a curated list of well-known Gemini models and verify the
-// credentials work by pinging a single model endpoint.
+// to mint a short-lived access token, then list live Gemini publisher models
+// from Model Garden.
 
 const TOKEN_URI = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/cloud-platform";
-
-// Curated list of Gemini models available on Vertex AI.
-// Kept in rough order of capability (newest/largest first).
-const KNOWN_VERTEX_MODELS: ModelInfo[] = [
-  { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
-  { id: "gemini-2.5-flash", name: "Gemini 2.5 Flash" },
-  {
-    id: "gemini-2.5-flash-lite-preview-06-17",
-    name: "Gemini 2.5 Flash Lite (Preview)",
-  },
-  { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash" },
-  { id: "gemini-2.0-flash-lite", name: "Gemini 2.0 Flash Lite" },
-  { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro" },
-  { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash" },
-];
+const DEFAULT_LOCATION = "us-central1";
+const PUBLISHER = "google";
+const MODEL_LIST_PAGE_SIZE = 1000;
+const GENERATION_MODEL_PREFIXES = ["gemini-"] as const;
+const EXCLUDED_MODEL_TERMS = [
+  "embedding",
+  "image",
+  "audio",
+  "speech",
+  "transcrib",
+  "tts",
+  "veo",
+  "imagen",
+  "chirp",
+] as const;
 
 /**
  * Base64url-encode a buffer or string (no padding).
@@ -94,18 +90,59 @@ async function getAccessToken(
   return data.access_token;
 }
 
-/**
- * Validate that the service account credentials can reach the Vertex AI API
- * by pinging a single known model's GET endpoint.
- * Returns true if the credentials + project + location are valid.
- */
-async function validateCredentials(
+function normalizeModelId(name: string): string {
+  const markers = [`publishers/${PUBLISHER}/models/`, "models/"];
+
+  for (const marker of markers) {
+    if (name.startsWith(marker)) {
+      return name.slice(marker.length);
+    }
+  }
+
+  return name;
+}
+
+function isSupportedGenerationModel(modelId: string): boolean {
+  const normalized = modelId.toLowerCase();
+
+  return (
+    GENERATION_MODEL_PREFIXES.some((prefix) => normalized.startsWith(prefix)) &&
+    !EXCLUDED_MODEL_TERMS.some((term) => normalized.includes(term))
+  );
+}
+
+function toDisplayName(modelId: string): string {
+  return modelId
+    .split("-")
+    .map((part) => {
+      if (/^\d+(\.\d+)?$/.test(part)) return part;
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(" ");
+}
+
+async function fetchPublisherModelsPage(
   accessToken: string,
   project: string,
   location: string,
-): Promise<boolean> {
-  // Use the publishers.models.get endpoint with a known model
-  const url = `https://${location}-aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.0-flash`;
+  pageToken?: string,
+): Promise<{
+  publisherModels: Array<{
+    name?: string;
+    versionId?: string;
+  }>;
+  nextPageToken?: string;
+}> {
+  const params = new URLSearchParams({
+    pageSize: String(MODEL_LIST_PAGE_SIZE),
+    listAllVersions: "true",
+  });
+
+  if (pageToken) {
+    params.set("pageToken", pageToken);
+  }
+
+  const url = `https://${location}-aiplatform.googleapis.com/v1beta1/publishers/${PUBLISHER}/models?${params.toString()}`;
 
   const res = await fetch(url, {
     headers: {
@@ -114,36 +151,90 @@ async function validateCredentials(
     },
   });
 
-  return res.ok;
+  if (!res.ok) {
+    throw new Error(
+      `Failed to list Vertex publisher models: ${res.status} ${await res.text()}`,
+    );
+  }
+
+  return (await res.json()) as {
+    publisherModels: Array<{
+      name?: string;
+      versionId?: string;
+    }>;
+    nextPageToken?: string;
+  };
+}
+
+async function fetchVertexPublisherModels(
+  accessToken: string,
+  project: string,
+  location: string,
+): Promise<ModelInfo[]> {
+  const models = new Map<string, ModelInfo>();
+  let pageToken: string | undefined;
+
+  do {
+    const page = await fetchPublisherModelsPage(
+      accessToken,
+      project,
+      location,
+      pageToken,
+    );
+
+    for (const model of page.publisherModels ?? []) {
+      if (!model.name) continue;
+
+      const id = normalizeModelId(model.name);
+      if (!isSupportedGenerationModel(id)) continue;
+
+      const existing = models.get(id);
+      const displayName = toDisplayName(id);
+
+      if (!existing) {
+        models.set(id, {
+          id,
+          name: displayName,
+        });
+      }
+    }
+
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  return [...models.values()].sort((a, b) =>
+    a.id.localeCompare(b.id, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    }),
+  );
 }
 
 export async function fetchVertexModels(
   project: string,
-  location: string = "us-central1",
+  location: string = DEFAULT_LOCATION,
   clientEmail?: string,
   privateKey?: string,
 ): Promise<ModelInfo[]> {
   if (!clientEmail || !privateKey) {
-    // No service account credentials — can't authenticate
     throw new Error(
       "Vertex AI requires service account credentials. Run: crack-code --setup",
     );
   }
 
-  // Get an access token from the service account
   const accessToken = await getAccessToken(clientEmail, privateKey);
+  const models = await fetchVertexPublisherModels(
+    accessToken,
+    project,
+    location,
+  );
 
-  // Validate that credentials actually work against the Vertex API
-  const valid = await validateCredentials(accessToken, project, location);
-
-  if (!valid) {
+  if (models.length === 0) {
     throw new Error(
-      "Vertex AI credentials validation failed. " +
-        "Ensure the service account has the 'Vertex AI User' role " +
-        "and the project/location are correct.",
+      "No supported Vertex AI Gemini models were found. " +
+        "Ensure the project/location are correct and the service account has access.",
     );
   }
 
-  // Return the curated list — the credentials are confirmed working
-  return KNOWN_VERTEX_MODELS;
+  return models;
 }
