@@ -14,9 +14,22 @@ import { fetchOpenRouterModels } from "./providers/openrouter";
 
 import * as readline from "node:readline";
 import { CrackCodeLogo } from "./logo/crack-code";
-import { pastel } from "gradient-string";
+
+const ANSI = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  magenta: "\x1b[35m",
+  white: "\x1b[37m",
+  gray: "\x1b[90m",
+  red: "\x1b[31m",
+} as const;
 
 export interface Config {
+  userName?: string;
   provider:
     | "openai"
     | "google"
@@ -58,6 +71,7 @@ export interface Config {
 }
 
 interface StoredConfig {
+  userName?: string;
   provider: Config["provider"];
   model: string;
   apiKey: string;
@@ -248,42 +262,449 @@ function prompt(question: string): Promise<string> {
   });
 }
 
+interface MenuOption<T extends string = string> {
+  value: T;
+  label: string;
+  description?: string;
+  meta?: string;
+}
+
+function clearLastLines(count: number): void {
+  for (let i = 0; i < count; i++) {
+    process.stdout.write("\x1b[1A\x1b[2K\r");
+  }
+}
+
+async function selectMenu<T extends string>(
+  title: string,
+  subtitle: string,
+  options: MenuOption<T>[],
+  initialIndex = 0,
+): Promise<T> {
+  if (!process.stdin.isTTY) {
+    return options[Math.max(0, Math.min(initialIndex, options.length - 1))]!
+      .value;
+  }
+
+  let selected = Math.max(0, Math.min(initialIndex, options.length - 1));
+  let renderedLines = 0;
+  const windowSize = 6;
+
+  const render = () => {
+    const start = Math.max(
+      0,
+      Math.min(
+        selected - Math.floor(windowSize / 2),
+        Math.max(0, options.length - windowSize),
+      ),
+    );
+    const visible = options.slice(start, start + windowSize);
+
+    const lines: string[] = [
+      "",
+      `${ANSI.bold}${ANSI.white}${title}${ANSI.reset}`,
+      `${ANSI.gray}${subtitle}${ANSI.reset}`,
+      "",
+    ];
+
+    if (start > 0) {
+      lines.push(`${ANSI.gray}  ↑ ${start} more${ANSI.reset}`);
+      lines.push("");
+    }
+
+    for (let i = 0; i < visible.length; i++) {
+      const absoluteIndex = start + i;
+      const option = visible[i]!;
+      const active = absoluteIndex === selected;
+
+      const pointer = active
+        ? `${ANSI.cyan}›${ANSI.reset}`
+        : `${ANSI.gray} ${ANSI.reset}`;
+
+      const line =
+        `${pointer} ${active ? `${ANSI.bold}${ANSI.white}${option.label}${ANSI.reset}` : `${ANSI.white}${option.label}${ANSI.reset}`}` +
+        `${option.meta ? ` ${ANSI.gray}(${option.meta})${ANSI.reset}` : ""}`;
+
+      lines.push(line);
+
+      if (option.description) {
+        lines.push(
+          `  ${active ? `${ANSI.green}${option.description}${ANSI.reset}` : `${ANSI.gray}${option.description}${ANSI.reset}`}`,
+        );
+      }
+    }
+
+    if (start + visible.length < options.length) {
+      lines.push("");
+      lines.push(
+        `${ANSI.gray}  ↓ ${options.length - (start + visible.length)} more${ANSI.reset}`,
+      );
+    }
+
+    lines.push("");
+    lines.push(
+      `${ANSI.gray}↑/↓ navigate • enter select • esc cancel${ANSI.reset}`,
+    );
+
+    if (renderedLines > 0) {
+      clearLastLines(renderedLines);
+    }
+
+    process.stdout.write(lines.join("\n") + "\n");
+    renderedLines = lines.length;
+  };
+
+  return await new Promise<T>((resolve, reject) => {
+    const cleanup = () => {
+      process.stdin.removeListener("data", onData);
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdin.pause();
+      if (renderedLines > 0) {
+        clearLastLines(renderedLines);
+        renderedLines = 0;
+      }
+    };
+
+    const onData = (buffer: Buffer) => {
+      const key = buffer.toString();
+
+      if (key === "\u0003") {
+        cleanup();
+        process.stdout.write("\n");
+        process.exit(0);
+      }
+
+      if (key === "\u001b[A") {
+        selected = selected > 0 ? selected - 1 : options.length - 1;
+        render();
+        return;
+      }
+
+      if (key === "\u001b[B") {
+        selected = selected < options.length - 1 ? selected + 1 : 0;
+        render();
+        return;
+      }
+
+      if (key === "\r") {
+        const chosen = options[selected]!;
+        cleanup();
+        process.stdout.write(
+          `${ANSI.green}✓${ANSI.reset} ${ANSI.white}${title}${ANSI.reset}: ${chosen.label}\n`,
+        );
+        resolve(chosen.value);
+        return;
+      }
+
+      if (key === "\u001b") {
+        cleanup();
+        reject(new Error("Setup cancelled."));
+        return;
+      }
+
+      const digit = Number.parseInt(key, 10);
+      if (!Number.isNaN(digit) && digit >= 1 && digit <= options.length) {
+        selected = digit - 1;
+        render();
+      }
+    };
+
+    render();
+
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+    }
+    process.stdin.resume();
+    process.stdin.on("data", onData);
+  });
+}
+
 function spinner(text: string): { stop: () => void } {
   const frames = ["", "", "", "", "", "", ""];
   let i = 0;
   const id = setInterval(() => {
     process.stdout.write(
-      `\r\x1b[90m${frames[i++ % frames.length]} ${text}\x1b[0m`,
+      `\r${ANSI.gray}${frames[i++ % frames.length]} ${text}${ANSI.reset}\x1b[K`,
     );
   }, 80);
   return {
     stop: () => {
       clearInterval(id);
-      process.stdout.write(`\r\x1b[K`); // clear line
+      process.stdout.write(`\r\x1b[K`);
     },
   };
 }
 
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleLength(text: string): number {
+  return stripAnsi(text).length;
+}
+
+function padVisible(text: string, width: number): string {
+  const pad = Math.max(0, width - visibleLength(text));
+  return text + " ".repeat(pad);
+}
+
+function truncateVisible(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (visibleLength(text) <= width) return text;
+
+  let out = "";
+  let visible = 0;
+  let i = 0;
+
+  while (i < text.length && visible < Math.max(0, width - 1)) {
+    if (text[i] === "\x1b") {
+      const match = text.slice(i).match(/^\x1b\[[0-9;]*m/);
+      if (match) {
+        out += match[0];
+        i += match[0].length;
+        continue;
+      }
+    }
+
+    out += text[i]!;
+    visible++;
+    i++;
+  }
+
+  return out + "…";
+}
+
+function normalizeCell(text: string, width: number): string {
+  return padVisible(truncateVisible(text, width), width);
+}
+
+function setupWidth(): number {
+  const columns = process.stdout.columns || 120;
+  return Math.max(72, Math.min(columns - 2, 118));
+}
+
+function setupRule(width = setupWidth()): string {
+  return `${ANSI.gray}${"─".repeat(width)}${ANSI.reset}`;
+}
+
+function setupBox(title: string, lines: string[], width = setupWidth()): void {
+  const inner = Math.max(16, width - 4);
+  const prefix =
+    `${ANSI.gray}╭─ ${ANSI.reset}` +
+    `${ANSI.cyan}${ANSI.bold}${title}${ANSI.reset}` +
+    `${ANSI.gray} `;
+  const fill = "─".repeat(Math.max(0, width - visibleLength(prefix) - 1));
+  const top = `${prefix}${fill}╮${ANSI.reset}`;
+  const bottom = `${ANSI.gray}╰${"─".repeat(width - 2)}╯${ANSI.reset}`;
+
+  console.log(top);
+  for (const line of lines) {
+    console.log(
+      `${ANSI.gray}│ ${ANSI.reset}${normalizeCell(line, inner)}${ANSI.gray} │${ANSI.reset}`,
+    );
+  }
+  console.log(bottom);
+}
+
+function setupSection(title: string, subtitle?: string): void {
+  console.log();
+  console.log(`${ANSI.bold}${ANSI.white}${title}${ANSI.reset}`);
+  if (subtitle) {
+    console.log(`${ANSI.gray}${subtitle}${ANSI.reset}`);
+  }
+}
+
+function setupHint(message: string): void {
+  console.log(`${ANSI.gray}${message}${ANSI.reset}`);
+}
+
+function setupSuccess(message: string): void {
+  console.log(`${ANSI.green}✓${ANSI.reset} ${message}`);
+}
+
+function setupWarn(message: string): void {
+  console.log(
+    `${ANSI.yellow}⚠${ANSI.reset} ${ANSI.yellow}${message}${ANSI.reset}`,
+  );
+}
+
+function setupError(message: string): void {
+  console.log(`${ANSI.red}✗${ANSI.reset} ${message}`);
+}
+
+function providerLabel(provider: Config["provider"]): string {
+  switch (provider) {
+    case "anthropic":
+      return "Anthropic";
+    case "azure":
+      return "Azure OpenAI";
+    case "google":
+      return "Google AI";
+    case "openai":
+      return "OpenAI";
+    case "openrouter":
+      return "OpenRouter";
+    case "ollama":
+      return "Ollama";
+    case "vertex":
+      return "Vertex AI";
+  }
+}
+
+function maskSecret(value: string): string {
+  if (!value) return "not set";
+  if (value.length <= 12) return `${value.slice(0, 3)}••••${value.slice(-2)}`;
+  return `${value.slice(0, 6)}••••${value.slice(-4)}`;
+}
+
+async function selectProvider(
+  initialProvider?: Config["provider"],
+): Promise<Config["provider"]> {
+  const providerDescriptions: Record<Config["provider"], string> = {
+    anthropic: "Claude models for deep security reasoning and code review",
+    azure: "Azure OpenAI deployments for enterprise-hosted model access",
+    google: "Google Gemini models for broad analysis and fast iteration",
+    openai: "OpenAI GPT models for security reviews and remediation guidance",
+    openrouter: "Unified access to many hosted frontier and open models",
+    ollama: "Local models running on your machine for private scanning",
+    vertex: "Google Cloud Vertex AI with service-account authentication",
+  };
+
+  const options: MenuOption<Config["provider"]>[] = PROVIDERS.map(
+    (provider) => ({
+      value: provider,
+      label: providerLabel(provider),
+      description: providerDescriptions[provider],
+      meta: provider,
+    }),
+  );
+
+  const initialIndex = initialProvider
+    ? Math.max(0, PROVIDERS.indexOf(initialProvider))
+    : 0;
+
+  return await selectMenu(
+    "Provider",
+    "Choose the default backend",
+    options,
+    initialIndex,
+  );
+}
+
+async function selectModel(
+  models: ModelInfo[],
+  currentModel?: string,
+): Promise<string> {
+  const display = models.slice(0, 30);
+  const customValue = "__custom__";
+
+  const options: MenuOption<string>[] = [
+    ...display.map((m) => ({
+      value: m.id,
+      label: m.id,
+      description:
+        m.name !== m.id ? m.name : "Use this model for future scans by default",
+      meta: "model",
+    })),
+    {
+      value: customValue,
+      label: "Enter custom model name",
+      description: "Use a model identifier that is not listed above",
+      meta: "custom",
+    },
+  ];
+
+  const initialIndex = currentModel
+    ? Math.max(
+        0,
+        options.findIndex((option) => option.value === currentModel),
+      )
+    : 0;
+
+  const selected = await selectMenu(
+    "Model",
+    "Pick the default model for scans",
+    options,
+    initialIndex === -1 ? 0 : initialIndex,
+  );
+
+  if (selected === customValue) {
+    const customModel = await prompt(
+      `${ANSI.bold}${ANSI.cyan}Custom model name${ANSI.reset}: `,
+    );
+    if (!customModel) {
+      throw new Error("Model is required.");
+    }
+    return customModel;
+  }
+
+  return selected;
+}
+
+function printSetupSummary(stored: StoredConfig): void {
+  const lines = [
+    ...(stored.userName
+      ? [`${ANSI.white}User${ANSI.reset}       ${stored.userName}`]
+      : []),
+    `${ANSI.white}Provider${ANSI.reset}   ${providerLabel(stored.provider)} ${ANSI.gray}(${stored.provider})${ANSI.reset}`,
+    `${ANSI.white}Model${ANSI.reset}      ${stored.model}`,
+    `${ANSI.white}Auth${ANSI.reset}       ${
+      stored.provider === "vertex"
+        ? "Google service account"
+        : `API key ${ANSI.gray}${maskSecret(stored.apiKey)}${ANSI.reset}`
+    }`,
+    ...(stored.resourceName
+      ? [`${ANSI.white}Resource${ANSI.reset}   ${stored.resourceName}`]
+      : []),
+    ...(stored.project
+      ? [`${ANSI.white}Project${ANSI.reset}    ${stored.project}`]
+      : []),
+    ...(stored.location
+      ? [`${ANSI.white}Location${ANSI.reset}   ${stored.location}`]
+      : []),
+    `${ANSI.white}Config${ANSI.reset}     ${CONFIG_PATH}`,
+  ];
+
+  setupBox("Configuration saved", lines);
+}
+
 // first run startup
 async function firstRunSetup(): Promise<StoredConfig> {
-  console.log(pastel(CrackCodeLogo()), "\n");
-  console.log("This will be saved to ~/.crack-code/config.json\n");
-  console.log("You can change it anytime with: crack-code --setup");
+  const existing = await readStoredConfig();
 
-  // Provider setup
-  console.log("\x1b[1mSelect a provider:\x1b[0m");
-  PROVIDERS.forEach((p, i) => {
-    console.log(`  \x1b[36m${i + 1}\x1b[0m) ${p}`);
-  });
+  console.log();
+  console.log(`${ANSI.cyan}${CrackCodeLogo()}${ANSI.reset}`);
+  console.log(setupRule());
+  setupBox("Welcome", [
+    `${ANSI.white}Configure Crack Code for vulnerability scanning and agent-assisted code review.${ANSI.reset}`,
+    `${ANSI.gray}Your selections will be saved to ~/.crack-code/config.json and can be changed anytime with:${ANSI.reset}`,
+    `${ANSI.cyan}  crack-code --setup${ANSI.reset}`,
+  ]);
 
-  let providerIdx = 0;
-  while (true) {
-    const answer = await prompt("\nProvider [1]: ");
-    providerIdx = answer ? parseInt(answer, 10) - 1 : 0;
-    if (providerIdx >= 0 && providerIdx < PROVIDERS.length) break;
-    console.log("\x1b[31mInvalid choice.\x1b[0m");
+  setupSection(
+    "1. Setup profile",
+    "Start with your name so Crack Code can personalize the agent context",
+  );
+  let userName = "";
+  while (!userName) {
+    const answer = await prompt(
+      `${ANSI.bold}${ANSI.cyan}Your name${ANSI.reset}${existing?.userName ? ` ${ANSI.gray}[${existing.userName}]${ANSI.reset}` : ""}: `,
+    );
+    userName = answer || existing?.userName || "";
+    if (!userName) {
+      setupError("Your name is required.");
+    }
   }
-  const provider = PROVIDERS[providerIdx]!;
+  setupSuccess(`Hello, ${userName}.`);
+
+  setupSection(
+    "2. Choose a provider",
+    "Use arrow keys to pick the default backend",
+  );
+  const provider = await selectProvider(existing?.provider);
+  setupSuccess(`Selected ${providerLabel(provider)}.`);
 
   // Provider-specific credential gathering
   let apiKey = "";
@@ -295,23 +716,25 @@ async function firstRunSetup(): Promise<StoredConfig> {
   let vertexClientEmail: string | undefined;
   let vertexPrivateKey: string | undefined;
 
+  setupSection(
+    "3. Configure authentication",
+    `Set up credentials for ${providerLabel(provider)}`,
+  );
+
   if (provider === "vertex") {
-    // Vertex uses a service account JSON for authentication
-    console.log(
-      "\n\x1b[90mVertex AI authenticates via a Google Cloud service account JSON.\x1b[0m",
-    );
-    console.log(
-      "\x1b[90mYou can get one from: https://console.cloud.google.com/iam-admin/serviceaccounts\x1b[0m",
-    );
-    console.log(
-      "\x1b[90mCreate a key (JSON) for the service account and paste the file path below.\x1b[0m\n",
-    );
+    setupBox("Vertex AI setup", [
+      `${ANSI.white}Vertex AI uses a Google Cloud service account JSON.${ANSI.reset}`,
+      `${ANSI.gray}Create or download a service account key, then provide the local JSON file path.${ANSI.reset}`,
+      `${ANSI.gray}Docs: https://console.cloud.google.com/iam-admin/serviceaccounts${ANSI.reset}`,
+    ]);
 
-    const saPath = await prompt("Path to service account JSON file: ");
-    if (!saPath)
+    const saPath = await prompt(
+      `${ANSI.bold}${ANSI.cyan}Service account JSON path${ANSI.reset}: `,
+    );
+    if (!saPath) {
       throw new Error("Service account JSON path is required for Vertex AI.");
+    }
 
-    // Read and parse the service account JSON
     let saJson: {
       client_email?: string;
       private_key?: string;
@@ -336,68 +759,89 @@ async function firstRunSetup(): Promise<StoredConfig> {
     vertexClientEmail = saJson.client_email;
     vertexPrivateKey = saJson.private_key;
 
-    // Use project_id from the JSON if available, otherwise ask
     project =
       saJson.project_id ??
       process.env.GOOGLE_CLOUD_PROJECT ??
-      (await prompt("\nGoogle Cloud project ID: "));
+      (await prompt(
+        `\n${ANSI.bold}${ANSI.cyan}Google Cloud project ID${ANSI.reset}: `,
+      ));
     if (!project) throw new Error("Project ID is required for Vertex AI.");
 
     location =
       (process.env.GOOGLE_CLOUD_LOCATION ??
-        (await prompt("Location [us-central1]: "))) ||
+        (await prompt(
+          `${ANSI.bold}${ANSI.cyan}Location${ANSI.reset} ${ANSI.gray}[us-central1]${ANSI.reset}: `,
+        ))) ||
       "us-central1";
 
-    // Use a placeholder — Vertex authenticates via service account, not a pasted key
     apiKey = "service-account";
 
-    console.log(pc.green(`\n✓ Service account loaded: ${vertexClientEmail}`));
+    setupSuccess(`Service account loaded: ${vertexClientEmail}`);
   } else if (provider === "azure") {
-    // Azure needs both an API key and a resource name
     const envKey = process.env.AZURE_API_KEY;
 
     if (envKey) {
       const masked = envKey.slice(0, 8) + "..." + envKey.slice(-4);
+      setupHint(`Found AZURE_API_KEY in your environment (${masked}).`);
       const useEnv = await prompt(
-        `\nFound AZURE_API_KEY (${masked}). Use it? [Y/n]: `,
+        `${ANSI.bold}${ANSI.cyan}Use detected API key?${ANSI.reset} ${ANSI.gray}[Y/n]${ANSI.reset}: `,
       );
       apiKey =
         !useEnv || useEnv.toLowerCase() === "y"
           ? envKey
-          : await prompt("Enter Azure API key: ");
+          : await prompt(
+              `${ANSI.bold}${ANSI.cyan}Azure API key${ANSI.reset}: `,
+            );
     } else {
-      apiKey = await prompt("\nEnter your Azure API key: ");
+      apiKey = await prompt(
+        `${ANSI.bold}${ANSI.cyan}Azure API key${ANSI.reset}: `,
+      );
     }
     if (!apiKey) throw new Error("API key is required.");
 
     resourceName =
       process.env.AZURE_RESOURCE_NAME ??
-      (await prompt("Azure resource name: "));
-    if (!resourceName)
+      (await prompt(
+        `${ANSI.bold}${ANSI.cyan}Azure resource name${ANSI.reset}: `,
+      ));
+    if (!resourceName) {
       throw new Error("Resource name is required for Azure OpenAI.");
+    }
+
+    setupSuccess("Azure credentials captured.");
   } else {
-    // Standard providers — single API key
     const envKey = process.env[API_KEY_ENV[provider]];
 
     if (envKey) {
       const masked = envKey.slice(0, 8) + "..." + envKey.slice(-4);
+      setupHint(
+        `Found ${API_KEY_ENV[provider]} in your environment (${masked}).`,
+      );
       const useEnv = await prompt(
-        `\nFound ${API_KEY_ENV[provider]} (${masked}). Use it? [Y/n]: `,
+        `${ANSI.bold}${ANSI.cyan}Use detected API key?${ANSI.reset} ${ANSI.gray}[Y/n]${ANSI.reset}: `,
       );
       if (!useEnv || useEnv.toLowerCase() === "y") {
         apiKey = envKey;
       } else {
-        apiKey = await prompt("Enter API key: ");
+        apiKey = await prompt(`${ANSI.bold}${ANSI.cyan}API key${ANSI.reset}: `);
       }
     } else {
-      apiKey = await prompt(`\nEnter your ${provider} API key: `);
+      apiKey = await prompt(
+        `${ANSI.bold}${ANSI.cyan}${providerLabel(provider)} API key${ANSI.reset}: `,
+      );
     }
 
     if (!apiKey) {
       throw new Error("API key is required.");
     }
+
+    setupSuccess(`${providerLabel(provider)} credentials captured.`);
   }
 
+  setupSection(
+    "4. Choose a model",
+    "Use arrow keys to pick a default model for interactive scans",
+  );
   const loading = spinner("Fetching available models...");
   const models = await fetchModels(provider, apiKey, {
     resourceName,
@@ -411,52 +855,19 @@ async function firstRunSetup(): Promise<StoredConfig> {
   let model: string;
 
   if (models.length > 0) {
-    console.log(`\n\x1b[1mAvailable models:\x1b[0m`);
-
-    // Show paginated if too many
-    const display = models.slice(0, 30);
-    display.forEach((m, i) => {
-      const label =
-        m.name !== m.id ? `${m.id} \x1b[90m(${m.name})\x1b[0m` : m.id;
-      console.log(`  \x1b[36m${String(i + 1).padStart(2)}\x1b[0m) ${label}`);
-    });
-    if (models.length > 30) {
-      console.log(
-        `\x1b[90m  ... and ${models.length - 30} more. Enter a custom name to use unlisted models.\x1b[0m`,
-      );
-    }
-    console.log(
-      `  \x1b[36m ${display.length + 1}\x1b[0m) Enter custom model name`,
-    );
-
-    while (true) {
-      const answer = await prompt(`\nModel [1]: `);
-      const idx = answer ? parseInt(answer, 10) - 1 : 0;
-
-      if (!isNaN(idx) && idx >= 0 && idx < display.length) {
-        model = display[idx]!.id;
-        break;
-      } else if (idx === display.length) {
-        model = await prompt("Enter model name: ");
-        if (model) break;
-      } else if (answer && isNaN(parseInt(answer, 10))) {
-        // User typed a model name directly
-        model = answer;
-        break;
-      }
-      console.log("\x1b[31mInvalid choice.\x1b[0m");
-    }
+    model = await selectModel(models, existing?.model);
   } else {
-    // Fallback — API fetch failed, ask for manual input
-    console.log(
-      "\n\x1b[33mCouldn't fetch models. Enter a model name manually.\x1b[0m",
+    setupWarn(
+      "Could not fetch models automatically. Enter a model name manually.",
     );
-    model = await prompt("Model: ");
+    model = await prompt(`${ANSI.bold}${ANSI.cyan}Model${ANSI.reset}: `);
     if (!model) {
       throw new Error("Model is required.");
     }
   }
+
   const stored: StoredConfig = {
+    userName,
     provider,
     model,
     apiKey,
@@ -466,17 +877,33 @@ async function firstRunSetup(): Promise<StoredConfig> {
     ...(vertexClientEmail ? { vertexClientEmail } : {}),
     ...(vertexPrivateKey ? { vertexPrivateKey } : {}),
   };
+
   await writeStoredConfig(stored);
 
-  console.log(`\n\x1b[32m✓ Saved: provider=${provider}, model=${model}\x1b[0m`);
-  console.log(`\x1b[90m  ${CONFIG_PATH}\x1b[0m\n`);
+  console.log();
+  printSetupSummary(stored);
+  console.log(
+    `${ANSI.green}✓${ANSI.reset} ${ANSI.white}Ready.${ANSI.reset} Start scanning with ${ANSI.cyan}crack-code${ANSI.reset}`,
+  );
+  console.log();
 
   return stored;
 }
 
-function buildSystemPrompt(cwd: string, allowEdits: boolean): string {
+function buildSystemPrompt(
+  cwd: string,
+  allowEdits: boolean,
+  userName?: string,
+): string {
   const lines = [
     "You are Crack Code — a security-focused code analysis assistant running in the user's terminal.",
+    ...(userName
+      ? [
+          "",
+          `User: ${userName}`,
+          "Address the user by name when it is natural and helpful.",
+        ]
+      : []),
     "",
     `Working directory: ${cwd}`,
     "",
@@ -567,6 +994,7 @@ export async function loadConfig(
   const cwd = process.cwd();
 
   return {
+    userName: stored.userName,
     provider,
     model,
     apiKey: apiKey ?? "",
@@ -580,7 +1008,7 @@ export async function loadConfig(
     maxSteps: overrides.maxSteps ?? 30,
     permissionPolicy: overrides.permissionPolicy ?? "ask",
     allowEdits,
-    systemPrompt: buildSystemPrompt(cwd, allowEdits),
+    systemPrompt: buildSystemPrompt(cwd, allowEdits, stored.userName),
     scanPatterns: overrides.scanPatterns ?? DEFAULT_SCAN_PATTERNS,
     ignorePatterns: overrides.ignorePatterns ?? DEFAULT_IGNORE_PATTERNS,
     cwd,
@@ -597,5 +1025,5 @@ export async function updateStoredConfig(
   const existing = (await readStoredConfig()) ?? ({} as StoredConfig);
   const merged = { ...existing, ...updates };
   await writeStoredConfig(merged);
-  console.log(`\x1b[32m✓ Config updated\x1b[0m`);
+  setupSuccess("Config updated");
 }
