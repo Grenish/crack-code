@@ -35,13 +35,21 @@ export function getModel(config: Config): LanguageModel {
         baseURL: "https://openrouter.ai/api/v1",
         headers: {
           "HTTP-Referer": "https://github.com/grenishrai/crack-code",
-          "X-Title": "crack-code",
+          "X-OpenRouter-Title": "crack-code",
         },
       }).chat(model);
 
-    case "ollama":
-      // For ollama the "apiKey" field holds the endpoint URL
-      return createOllama({ baseURL: apiKey || undefined })(model);
+    case "ollama": {
+      // For ollama the "apiKey" field holds the endpoint URL.
+      // Normalize to include `/api` so chat requests go to `/api/chat`
+      // instead of `/chat` (which returns 404 on Ollama).
+      const rawBaseURL = (apiKey || "").trim();
+      const normalizedBaseURL = rawBaseURL
+        ? rawBaseURL.replace(/\/+$/, "").replace(/\/api$/, "") + "/api"
+        : undefined;
+
+      return createOllama({ baseURL: normalizedBaseURL })(model);
+    }
 
     case "vertex": {
       const vertexOptions: Record<string, unknown> = {
