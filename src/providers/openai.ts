@@ -1,4 +1,14 @@
 import type { ModelInfo } from "./types";
+import { isLikelyTextGenerationModel, normalizeModels } from "./utils";
+
+interface OpenAIModel {
+  id: string;
+  created?: number;
+}
+
+interface OpenAIModelsResponse {
+  data?: OpenAIModel[];
+}
 
 export async function fetchOpenAIModels(apiKey: string): Promise<ModelInfo[]> {
   const res = await fetch("https://api.openai.com/v1/models", {
@@ -7,19 +17,44 @@ export async function fetchOpenAIModels(apiKey: string): Promise<ModelInfo[]> {
 
   if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
 
-  const data = (await res.json()) as { data: Array<{ id: string }> };
+  const data = (await res.json()) as OpenAIModelsResponse;
 
-  // Filter to chat models only — skip embeddings, tts, dall-e, whisper, etc.
-  const chatPrefixes = ["gpt-", "o1", "o3", "o4", "chatgpt-"];
-  const exclude = ["instruct", "realtime", "audio", "search"];
+  const preferredPrefixes = [
+    "gpt-",
+    "o1",
+    "o3",
+    "o4",
+    "o5",
+    "chatgpt-",
+  ] as const;
+  const excludedTerms = [
+    "embed",
+    "embedding",
+    "image",
+    "audio",
+    "speech",
+    "transcrib",
+    "tts",
+    "whisper",
+    "moderation",
+    "rerank",
+    "search",
+    "realtime",
+    "instruct",
+  ] as const;
 
-  return data.data
-    .filter((m) => {
-      const id = m.id.toLowerCase();
-      const hasPrefix = chatPrefixes.some((p) => id.startsWith(p));
-      const isExcluded = exclude.some((e) => id.includes(e));
-      return hasPrefix && !isExcluded;
-    })
-    .map((m) => ({ id: m.id, name: m.id }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+  const models = (data.data ?? [])
+    .filter((model) =>
+      isLikelyTextGenerationModel(model.id, {
+        includePrefixes: preferredPrefixes,
+        excludeTerms: excludedTerms,
+      }),
+    )
+    .sort((a, b) => (b.created ?? 0) - (a.created ?? 0))
+    .map((model) => ({
+      id: model.id,
+      name: model.id,
+    }));
+
+  return normalizeModels(models);
 }
