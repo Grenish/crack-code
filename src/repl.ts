@@ -1,5 +1,17 @@
 import type { ModelMessage, LanguageModel } from "ai";
-import type { Config } from "./config.js";
+import * as p from "@clack/prompts";
+import { stat } from "node:fs/promises";
+import { homedir, hostname, userInfo } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import {
+  fetchModels,
+  isSetupCancelledError,
+  loadConfig,
+  runProviderSetup,
+  updateStoredConfig,
+  type Config,
+} from "./config.js";
+import { getModel } from "./providers.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { PermissionManager } from "./permissions/index.js";
 import { runAgent, type TokenUsage } from "./agent.js";
@@ -14,6 +26,7 @@ interface ReplContext {
   permissions: PermissionManager;
   messages: ModelMessage[];
   totalUsage: TokenUsage;
+  input: InputController;
 }
 
 interface SlashCommand {
@@ -24,6 +37,111 @@ interface SlashCommand {
 interface InputController {
   readLine: () => Promise<string>;
   close: () => void;
+  suspend: <T>(task: () => Promise<T>) => Promise<T>;
+}
+
+interface PromptMeta {
+  cwd: string;
+  isHome: boolean;
+  modelLabel: string;
+  mode: string;
+  policy: string;
+}
+
+interface ShellMeta {
+  gitBranch: string | null;
+  host: string;
+  osUser: string;
+  userHome: string;
+}
+
+function unwrapPrompt<T>(value: T | symbol): T | null {
+  if (p.isCancel(value)) {
+    return null;
+  }
+
+  return value as T;
+}
+
+async function selectSessionModel(ctx: ReplContext): Promise<string | null> {
+  const loading = p.spinner();
+  loading.start(`Fetching models for ${ctx.config.provider}...`);
+
+  const models = await fetchModels(ctx.config.provider, ctx.config.apiKey, {
+    resourceName: ctx.config.resourceName,
+    project: ctx.config.project,
+    location: ctx.config.location,
+    vertexClientEmail: ctx.config.vertexClientEmail,
+    vertexPrivateKey: ctx.config.vertexPrivateKey,
+  });
+
+  loading.stop(
+    models.length > 0
+      ? `Loaded ${Math.min(models.length, 30)} model options`
+      : "Model lookup finished",
+  );
+
+  if (models.length === 0) {
+    const typed = unwrapPrompt(
+      await p.text({
+        message: `Model for ${ctx.config.provider}`,
+        initialValue: ctx.config.model,
+        validate: (value) =>
+          (value ?? "").trim().length === 0 ? "Model is required." : undefined,
+      }),
+    );
+
+    return typed ? typed.trim() : null;
+  }
+
+  const customValue = "__custom__";
+  const selected = unwrapPrompt(
+    await p.select({
+      message: `Choose a model for ${ctx.config.provider}`,
+      options: [
+        ...models.slice(0, 30).map((model) => ({
+          value: model.id,
+          label: model.id,
+          hint:
+            model.name !== model.id
+              ? model.name
+              : model.id === ctx.config.model
+                ? "current"
+                : undefined,
+        })),
+        {
+          value: customValue,
+          label: "Enter model manually",
+          hint: ctx.config.model === "" ? undefined : `current: ${ctx.config.model}`,
+        },
+      ],
+    }),
+  );
+
+  if (!selected) return null;
+  if (selected !== customValue) return selected;
+
+  const typed = unwrapPrompt(
+    await p.text({
+      message: `Model for ${ctx.config.provider}`,
+      initialValue: ctx.config.model,
+      validate: (value) =>
+        (value ?? "").trim().length === 0 ? "Model is required." : undefined,
+    }),
+  );
+
+  return typed ? typed.trim() : null;
+}
+
+function buildRuntimeOverrides(ctx: ReplContext) {
+  return {
+    allowEdits: ctx.config.allowEdits,
+    ignorePatterns: ctx.config.ignorePatterns,
+    maxSteps: ctx.config.maxSteps,
+    maxTokens: ctx.config.maxTokens,
+    permissionPolicy: ctx.permissions.getPolicy(),
+    scanPatterns: ctx.config.scanPatterns,
+  } satisfies Parameters<typeof loadConfig>[0];
 }
 
 // Slash Commands
@@ -83,12 +201,76 @@ const commands: Record<string, SlashCommand> = {
   },
 
   "/model": {
-    description: "Show current model and provider",
-    handler: (ctx) => {
-      console.log();
-      ui.dim(`  Provider: ${ctx.config.provider}`);
-      ui.dim(`  Model:    ${ctx.config.model}`);
-      console.log();
+    description: "Show or change the active model",
+    handler: async (ctx, args) => {
+      let nextModel: string | null;
+
+      try {
+        nextModel = args
+          ? args.trim()
+          : await ctx.input.suspend(() => selectSessionModel(ctx));
+      } catch (e: any) {
+        ui.error(e.message);
+        return;
+      }
+
+      if (!nextModel) {
+        ui.info(`Current model: ${ctx.config.model}`);
+        return;
+      }
+
+      if (nextModel === ctx.config.model) {
+        ui.info(`Model already set to ${nextModel}`);
+        return;
+      }
+
+      const previousModel = ctx.config.model;
+      ctx.config.model = nextModel;
+
+      try {
+        ctx.model = getModel(ctx.config);
+        await updateStoredConfig({ model: nextModel });
+        ui.success(
+          `Model changed: ${previousModel} → ${nextModel} (${ctx.config.provider})`,
+        );
+      } catch (e: any) {
+        ctx.config.model = previousModel;
+        ctx.model = getModel(ctx.config);
+        ui.error(e.message);
+      }
+    },
+  },
+
+  "/provider": {
+    description: "Choose a provider and update its credentials/model",
+    handler: async (ctx) => {
+      try {
+        await ctx.input.suspend(async () => {
+          await runProviderSetup();
+        });
+      } catch (e: any) {
+        if (isSetupCancelledError(e)) {
+          ui.info("Provider setup cancelled.");
+          return;
+        }
+        ui.error(e.message);
+        return;
+      }
+
+      try {
+        const nextConfig = await loadConfig(buildRuntimeOverrides(ctx));
+        ctx.config = nextConfig;
+        ctx.model = getModel(nextConfig);
+        ui.success(
+          `Provider configured: ${nextConfig.provider} • model ${nextConfig.model}`,
+        );
+      } catch (e: any) {
+        if (isSetupCancelledError(e)) {
+          ui.info("Provider setup cancelled.");
+          return;
+        }
+        ui.error(e.message);
+      }
     },
   },
 
@@ -149,30 +331,82 @@ const commands: Record<string, SlashCommand> = {
   },
 };
 
+async function detectGitBranch(startDir: string): Promise<string | null> {
+  let dir = startDir;
+
+  while (true) {
+    const dotGit = join(dir, ".git");
+
+    try {
+      const dotGitStat = await stat(dotGit);
+      let gitDir = dotGit;
+
+      if (dotGitStat.isFile()) {
+        const pointer = (await Bun.file(dotGit).text()).trim();
+        const match = pointer.match(/^gitdir:\s*(.+)$/i);
+        if (!match) return null;
+        gitDir = resolve(dir, match[1]!);
+      }
+
+      const headFile = Bun.file(join(gitDir, "HEAD"));
+      if (!(await headFile.exists())) return null;
+
+      const head = (await headFile.text()).trim();
+      const refMatch = head.match(/^ref:\s+refs\/heads\/(.+)$/);
+      return refMatch ? refMatch[1]! : head.slice(0, 12);
+    } catch {
+      const parent = dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
+  }
+}
+
+async function getShellMeta(cwd: string): Promise<ShellMeta> {
+  let osUser = "user";
+
+  try {
+    osUser = userInfo().username;
+  } catch {
+    // keep fallback
+  }
+
+  return {
+    gitBranch: await detectGitBranch(cwd),
+    host: hostname(),
+    osUser,
+    userHome: homedir(),
+  };
+}
+
+function formatModelLabel(provider: string, model: string): string {
+  return model.includes("/") ? model : `${provider}/${model}`;
+}
+
 // Input handling: raw-mode realtime line editor with lightweight hints
 
-function createInput(): InputController {
+function createInput(getPromptMeta: () => PromptMeta): InputController {
   const stdin = process.stdin;
   const stdout = process.stdout;
 
   const isTTY = Boolean(stdin.isTTY && stdout.isTTY);
   let closed = false;
+  let promptVisible = false;
 
   let pendingResolve: ((line: string) => void) | null = null;
   let line = "";
   let cursor = 0;
 
-  let activeHint = "";
-
   const commandHints = [
-    "/help  show commands",
-    "/clear clear history",
-    "/usage session tokens",
-    "/mode  toggle read-only/edit",
-    "/model show model",
-    "/policy set permission mode",
-    "/compact shrink context",
-    "/exit  quit",
+    "/help",
+    "/clear",
+    "/usage",
+    "/mode",
+    "/model",
+    "/provider",
+    "/policy",
+    "/compact",
+    "/exit",
   ];
 
   const cleanupTerminalState = () => {
@@ -186,87 +420,69 @@ function createInput(): InputController {
     stdout.write("\n");
   };
 
-  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
-
-  const visibleLen = (s: string): number => stripAnsi(s).length;
-
   const clearPromptRegion = () => {
-    // Clear exactly the two prompt lines (input + hint), then return to input row.
-    stdout.write("\r\x1b[2K"); // clear current line
-    stdout.write("\x1b[1B\r\x1b[2K"); // clear next line
-    stdout.write("\x1b[1A\r"); // back to input line start
+    if (!promptVisible || !isTTY) return;
+
+    // Cursor rests on the middle line of the 3-line prompt frame.
+    stdout.write("\x1b[1A\r\x1b[2K");
+    stdout.write("\x1b[1B\r\x1b[2K");
+    stdout.write("\x1b[1B\r\x1b[2K");
+    stdout.write("\x1b[2A\r");
   };
 
   const renderInput = () => {
     if (!pendingResolve || !isTTY) return;
 
-    const termWidth = Math.max(40, stdout.columns || 120);
     const commandMode = line.startsWith("/");
     const askMode = line.startsWith("?");
+    const promptMeta = getPromptMeta();
+
+    let placeholder = "Describe a scan target, exploit path, or remediation";
+    let footer = `Type / for commands • ? quick ask • mode ${promptMeta.mode} • policy ${promptMeta.policy}`;
 
     if (commandMode) {
+      placeholder = "Type a command";
+
       if (line.trim() === "/") {
-        activeHint = `\x1b[90m${commandHints.join("   \x1b[2m|\x1b[0m \x1b[90m")}\x1b[0m`;
+        footer = commandHints.join(" • ");
       } else {
         const needle = line.trim().toLowerCase();
         const matches = Object.keys(commands)
-          .filter((c) => c.startsWith(needle))
+          .filter((command) => command.startsWith(needle))
           .slice(0, 6);
 
-        if (matches.length > 0) {
-          activeHint = `\x1b[90m${matches
-            .map((m) => `${m} — ${commands[m]?.description ?? ""}`)
-            .join("   \x1b[2m|\x1b[0m \x1b[90m")}\x1b[0m`;
-        } else {
-          activeHint = "\x1b[90mNo matching command. Try /help\x1b[0m";
-        }
+        footer =
+          matches.length > 0
+            ? matches.join(" • ")
+            : "No matching command • /help shows all commands";
       }
     } else if (askMode) {
-      activeHint =
-        "\x1b[90mQuick ask mode: ask a short question and press Enter\x1b[0m";
-    } else {
-      activeHint =
-        "\x1b[90mType / for commands, ? for quick ask, Enter to send\x1b[0m";
+      placeholder = "Ask a short question";
+      footer = `Quick ask mode • Enter to send • mode ${promptMeta.mode}`;
+    } else if (line.length > 0) {
+      footer = `Enter to send • / commands • ? quick ask • mode ${promptMeta.mode} • policy ${promptMeta.policy}`;
     }
 
-    const prompt = "\x1b[1m\x1b[36m❯\x1b[0m ";
-    // Draw input + hint on a fixed 2-line surface so keystrokes don't stack lines.
     clearPromptRegion();
 
-    let hint = activeHint;
-    if (visibleLen(hint) > termWidth) {
-      const plain = stripAnsi(hint);
-      hint = `\x1b[90m${plain.slice(0, Math.max(0, termWidth - 1))}…\x1b[0m`;
+    const frame = ui.renderPromptFrame({
+      cwd: promptMeta.cwd,
+      modelLabel: promptMeta.modelLabel,
+      input: line,
+      cursor,
+      placeholder,
+      footer,
+      isHome: promptMeta.isHome,
+    });
+
+    stdout.write(frame.lines.join("\n"));
+    stdout.write("\x1b[1A\r");
+
+    if (frame.cursorCol > 0) {
+      stdout.write(`\x1b[${frame.cursorCol}C`);
     }
 
-    const promptVisible = visibleLen(prompt);
-    const inputWidth = Math.max(10, termWidth - promptVisible);
-    let displayStart = 0;
-
-    if (line.length > inputWidth) {
-      if (cursor <= inputWidth) {
-        displayStart = 0;
-      } else if (cursor >= line.length - 1) {
-        displayStart = line.length - inputWidth;
-      } else {
-        displayStart = Math.max(0, cursor - Math.floor(inputWidth / 2));
-        if (displayStart + inputWidth > line.length) {
-          displayStart = line.length - inputWidth;
-        }
-      }
-    }
-
-    const displayLine = line.slice(displayStart, displayStart + inputWidth);
-
-    stdout.write(`${prompt}${displayLine}\n`);
-    stdout.write(`${hint}`);
-    stdout.write("\x1b[1A\r"); // back to input line start
-    stdout.write(prompt);
-
-    const cursorInWindow = Math.max(0, cursor - displayStart);
-    if (cursorInWindow > 0) {
-      stdout.write(`\x1b[${cursorInWindow}C`);
-    }
+    promptVisible = true;
   };
 
   const finishLine = (value: string) => {
@@ -274,9 +490,10 @@ function createInput(): InputController {
     pendingResolve = null;
     line = "";
     cursor = 0;
-    activeHint = "";
-    // Move from input line to hint line, then to a fresh line below the fixed 2-line surface.
-    stdout.write("\x1b[1B\r\x1b[K\n");
+    if (promptVisible && isTTY) {
+      stdout.write("\x1b[2B\r");
+      promptVisible = false;
+    }
     resolve?.(value.trim());
   };
 
@@ -376,13 +593,44 @@ function createInput(): InputController {
           return;
         }
 
-        pendingResolve = resolve;
-        line = "";
-        cursor = 0;
+      pendingResolve = resolve;
+      line = "";
+      cursor = 0;
 
-        ui.userPrompt("");
         renderInput();
       }),
+
+    suspend: async <T>(task: () => Promise<T>): Promise<T> => {
+      if (!isTTY) {
+        return await task();
+      }
+
+      if (promptVisible) {
+        stdout.write("\x1b[2B\r");
+        promptVisible = false;
+      }
+
+      stdin.removeListener("data", onData);
+
+      try {
+        stdin.setRawMode(false);
+      } catch {
+        // ignore
+      }
+
+      stdin.pause();
+
+      try {
+        return await task();
+      } finally {
+        if (!closed) {
+          stdin.setEncoding("utf8");
+          stdin.resume();
+          stdin.setRawMode(true);
+          stdin.on("data", onData);
+        }
+      }
+    },
 
     close: () => {
       if (closed) return;
@@ -402,6 +650,14 @@ export async function startRepl(
   tools: ToolRegistry,
   permissions: PermissionManager,
 ): Promise<void> {
+  const shellMeta = await getShellMeta(config.cwd);
+  const input = createInput(() => ({
+    cwd: config.cwd,
+    isHome: config.cwd === shellMeta.userHome,
+    modelLabel: formatModelLabel(config.provider, config.model),
+    mode: ctx.config.allowEdits ? "edits enabled" : "read-only",
+    policy: ctx.permissions.getPolicy(),
+  }));
   const ctx: ReplContext = {
     model,
     config,
@@ -409,23 +665,15 @@ export async function startRepl(
     permissions,
     messages: [],
     totalUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    input,
   };
 
-  const mode = config.allowEdits ? "edits enabled" : "read-only";
-  const workspace = config.cwd;
-  const policy = permissions.getPolicy();
-
-  ui.banner(
-    config.model,
-    mode,
-    config.provider,
-    workspace,
-    policy,
-    ctx.messages.length,
-    config.userName,
-  );
-
-  const input = createInput();
+  ui.banner({
+    gitBranch: shellMeta.gitBranch,
+    host: shellMeta.host,
+    osUser: shellMeta.osUser,
+    userName: config.userName,
+  });
 
   while (true) {
     const userLine = await input.readLine();

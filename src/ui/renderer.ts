@@ -29,7 +29,7 @@ const C = {
 } as const;
 
 const APP_VERSION = "0.1.1";
-const MAX_SURFACE_WIDTH = 132;
+const MAX_SURFACE_WIDTH = 118;
 
 type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
 
@@ -583,26 +583,126 @@ export function spinner(text: string): SpinnerHandle {
 
 // ─── Prompts ────────────────────────────────────────────────────────
 
+export interface PromptFrameState {
+  cwd: string;
+  modelLabel: string;
+  input: string;
+  cursor: number;
+  placeholder: string;
+  footer: string;
+  isHome?: boolean;
+}
+
+export interface PromptFrameRender {
+  cursorCol: number;
+  lines: string[];
+}
+
+function composePromptFrameTop(
+  cwd: string,
+  modelLabel: string,
+  width: number,
+  isHome: boolean,
+): string {
+  const maxModel = Math.max(12, Math.floor(width * 0.34));
+  const rightPlain = truncate(modelLabel, maxModel);
+  const homeTag = isHome ? " [home]" : "";
+  const maxCwd = Math.max(14, width - rightPlain.length - 12);
+  const leftPlain = truncate(`${compactPath(cwd)}${homeTag}`, maxCwd);
+
+  const prefix = `${C.gray}╭─ ${C.reset}`;
+  const suffix = `${C.gray} ─╮${C.reset}`;
+  const left = isHome
+    ? `${C.yellow}${leftPlain}${C.reset}`
+    : `${C.white}${leftPlain}${C.reset}`;
+  const right = `${C.magenta}${rightPlain}${C.reset}`;
+  const fill = "─".repeat(
+    Math.max(
+      1,
+      width - visibleLength(prefix) - visibleLength(suffix) - leftPlain.length - rightPlain.length,
+    ),
+  );
+
+  return `${prefix}${left}${C.gray}${fill}${C.reset}${right}${suffix}`;
+}
+
+function composePromptFrameBottom(footer: string, width: number): string {
+  const prefix = `${C.gray}╰─ ${C.reset}`;
+  const suffix = `${C.gray} ─╯${C.reset}`;
+  const captionPlain = truncate(footer, Math.max(18, width - 10));
+  const caption = `${C.dim}${captionPlain}${C.reset}`;
+  const fill = "─".repeat(
+    Math.max(
+      1,
+      width - visibleLength(prefix) - visibleLength(suffix) - captionPlain.length,
+    ),
+  );
+
+  return `${prefix}${caption}${C.gray}${fill}${suffix}`;
+}
+
+export function renderPromptFrame(
+  state: PromptFrameState,
+): PromptFrameRender {
+  const width = panelWidth();
+  const inner = Math.max(20, width - 4);
+  const prompt = `${C.bold}${C.cyan}❯${C.reset} `;
+  const promptVisible = visibleLength(prompt);
+  const inputWidth = Math.max(10, inner - promptVisible);
+  const input = state.input;
+
+  let displayStart = 0;
+  if (input.length > inputWidth) {
+    if (state.cursor <= inputWidth) {
+      displayStart = 0;
+    } else if (state.cursor >= input.length - 1) {
+      displayStart = input.length - inputWidth;
+    } else {
+      displayStart = Math.max(0, state.cursor - Math.floor(inputWidth / 2));
+      if (displayStart + inputWidth > input.length) {
+        displayStart = input.length - inputWidth;
+      }
+    }
+  }
+
+  const visibleInput =
+    input.length > 0
+      ? input.slice(displayStart, displayStart + inputWidth)
+      : state.placeholder;
+  const content =
+    input.length > 0
+      ? visibleInput
+      : `${C.dim}${truncate(state.placeholder, inputWidth)}${C.reset}`;
+
+  const lines = [
+    composePromptFrameTop(
+      state.cwd,
+      state.modelLabel,
+      width,
+      Boolean(state.isHome),
+    ),
+    `${C.gray}│ ${C.reset}${prompt}${padVisible(content, inputWidth)}${C.gray} │${C.reset}`,
+    composePromptFrameBottom(state.footer, width),
+  ];
+
+  return {
+    lines,
+    cursorCol: 2 + promptVisible + Math.max(0, state.cursor - displayStart),
+  };
+}
+
 export function userPrompt(inputPreview = ""): void {
   if (activeSpinner) activeSpinner.stop();
 
-  const width = panelWidth();
-  const cmd = inputPreview.trimStart();
-
-  const realtimeHint =
-    cmd === "/"
-      ? `${C.dim}commands: /help /clear /usage /mode /model /policy /compact /exit${C.reset}`
-      : cmd.startsWith("?")
-        ? `${C.dim}quick ask mode · type your question and press Enter${C.reset}`
-        : `${C.dim}Type / for commands, ? for quick ask, or describe a scan target…${C.reset}`;
-
-  const left = `${C.bold}${C.cyan}❯${C.reset}`;
-  const composed = `${left} ${realtimeHint}`;
-  const line = truncateVisible(composed, width);
-
-  process.stdout.write(`\n${line}\n`);
-  process.stdout.write(`${C.gray}${"─".repeat(width)}${C.reset}\n`);
-  process.stdout.write(`${C.bold}${C.cyan}❯${C.reset} `);
+  const frame = renderPromptFrame({
+    cwd: process.cwd(),
+    modelLabel: "model",
+    input: inputPreview,
+    cursor: inputPreview.length,
+    placeholder: "Describe a scan target or threat to review",
+    footer: "/ commands • ? quick ask",
+  });
+  process.stdout.write(`${frame.lines.join("\n")}\n`);
 }
 
 export function permissionPrompt(name: string, summary: string): void {
@@ -651,95 +751,44 @@ export function dim(msg: string): void {
 
 // ─── Banner ─────────────────────────────────────────────────────────
 
-export function banner(
-  model: string,
-  mode: string,
-  provider?: string,
-  workspace?: string,
-  policy?: string,
-  messageCount = 0,
-  userName?: string,
-): void {
+export interface BannerState {
+  gitBranch?: string | null;
+  host: string;
+  osUser: string;
+  userName?: string;
+}
+
+export function banner(state: BannerState): void {
   if (activeSpinner) activeSpinner.stop();
 
-  const cwd = workspace ?? process.cwd();
   const width = panelWidth();
-  const gap = "    ";
-  const useColumns = width >= 108;
-  const columnWidth = useColumns
-    ? Math.floor((width - visibleLength(gap)) / 2)
-    : width;
   const logoLines = CrackCodeLogo()
     .trim()
     .split("\n")
     .map((line) => `${C.cyan}${line}${C.reset}`);
-
-  const topBar = `${C.gray}workspace${C.reset} ${C.white}${compactPath(cwd)}${C.reset}   ${C.gray}provider${C.reset} ${C.white}${provider ?? "unknown"}${C.reset}   ${C.gray}policy${C.reset} ${C.white}${policy ?? "ask"}${C.reset}   ${C.dim}v${APP_VERSION}${C.reset}`;
-  const greeting = userName?.trim()
-    ? `Welcome back, ${userName.trim()}.`
-    : "Welcome back.";
-  const title = [
-    `${C.bold}${C.white}${greeting} AI vulnerability scanning shell${C.reset}`,
-    `${C.dim}Focused on security analysis, exploit reasoning, and remediation guidance.${C.reset}`,
-  ];
-
-  const welcome = boxedSection(
-    "Welcome back",
-    [
-      `${C.bold}${C.white}Scan codebases like a dedicated security agent.${C.reset}`,
-      "",
-      `${C.gray}Workspace${C.reset}  ${C.white}${cwd}${C.reset}`,
-      `${C.gray}Provider${C.reset}   ${C.white}${provider ?? "unknown"}${C.reset}`,
-      `${C.gray}Model${C.reset}      ${C.white}${model}${C.reset}`,
-      `${C.gray}Mode${C.reset}       ${mode === "read-only" ? `${C.green}● read-only${C.reset}` : `${C.yellow}● edits enabled${C.reset}`}`,
-      `${C.gray}Policy${C.reset}     ${C.white}${policy ?? "ask"}${C.reset}`,
-    ],
-    columnWidth,
-    "cyan",
+  const gitLabel = state.gitBranch
+    ? `${C.green}yes${C.reset} ${C.white}(${state.gitBranch})${C.reset}`
+    : `${C.dim}no${C.reset}`;
+  const identity = truncateVisible(
+    `${C.gray}host${C.reset} ${C.white}${state.host}${C.reset} ${C.gray}:${C.reset} ${C.cyan}${state.osUser}${C.reset}   ${C.gray}git${C.reset} ${gitLabel}   ${C.dim}v${APP_VERSION}${C.reset}`,
+    width,
   );
-
-  const tips = boxedSection(
-    "Session",
-    [
-      `${C.white}/help${C.reset}      browse commands`,
-      `${C.white}/policy${C.reset}    review permission mode`,
-      `${C.white}/usage${C.reset}     inspect session tokens`,
-      `${C.white}/compact${C.reset}   shrink context when long`,
-      "",
-      `${C.gray}Messages${C.reset}   ${C.white}${messageCount}${C.reset}`,
-      `${C.gray}Focus${C.reset}      ${C.white}vulnerabilities, insecure flows, secrets, auth flaws${C.reset}`,
-    ],
-    columnWidth,
-    "magenta",
+  const greetingName = state.userName?.trim() || state.osUser;
+  const greeting = truncateVisible(
+    `${C.bold}${C.white}Hello ${greetingName}, what are we cracking today?${C.reset}`,
+    width,
   );
-
-  const cards = useColumns
-    ? joinColumns(welcome, tips, gap)
-    : [...welcome, "", ...tips];
-
-  const footer = truncateVisible(
-    `${C.gray}model${C.reset} ${C.white}${model}${C.reset}   ${C.gray}mode${C.reset} ${mode === "read-only" ? `${C.green}read-only${C.reset}` : `${C.yellow}edits enabled${C.reset}`}   ${C.gray}messages${C.reset} ${C.white}${String(messageCount)}${C.reset}`,
+  const subtitle = truncateVisible(
+    `${C.dim}Security review shell for vulnerabilities, exploit paths, and remediations.${C.reset}`,
     width,
   );
 
   console.log();
-  console.log(topBar);
-  console.log();
   for (const line of logoLines) console.log(line);
   console.log();
-  for (const line of title) console.log(line);
-  console.log();
-  for (const line of cards) console.log(line);
-  console.log();
-  console.log(rule(width));
-  console.log(
-    truncateVisible(
-      `${C.dim} Ask for a vulnerability scan, threat review, exploit path, or secure remediation guidance.${C.reset}`,
-      width,
-    ),
-  );
-  console.log(rule(width));
-  console.log(footer);
+  console.log(identity);
+  console.log(greeting);
+  console.log(subtitle);
   console.log();
 }
 

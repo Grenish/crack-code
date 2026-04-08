@@ -1,6 +1,11 @@
 #!/usr/bin/env bun
 
-import { loadConfig, runSetup, type ConfigOverrides } from "./config.js";
+import {
+  isSetupCancelledError,
+  loadConfig,
+  runSetup,
+  type ConfigOverrides,
+} from "./config.js";
 import { getModel } from "./providers.js";
 import { ToolRegistry } from "./tools/registry.js";
 import {
@@ -11,6 +16,7 @@ import { readFileTool } from "./tools/file-read.js";
 import { writeFileTool } from "./tools/file-write.js";
 import { runCommandTool } from "./tools/shell.js";
 import { listFilesTool } from "./tools/glob.js";
+import { virtualTerminalTool } from "./tools/virtual-terminal.js";
 import { runAgent } from "./agent.js";
 import { startRepl } from "./repl.js";
 import * as ui from "./ui/renderer.js";
@@ -131,6 +137,9 @@ function registerTools(allowEdits: boolean): ToolRegistry {
   // Shell is always available but goes through permission gate
   tools.register(runCommandTool);
 
+  // Virtual terminal — persistent context across commands
+  tools.register(virtualTerminalTool);
+
   // Write tools only when edits are enabled
   if (allowEdits) {
     tools.register(writeFileTool);
@@ -157,8 +166,16 @@ async function main(): Promise<void> {
   }
 
   if (flags.setup) {
-    await runSetup();
-    process.exit(0);
+    try {
+      await runSetup();
+      process.exit(0);
+    } catch (e: any) {
+      if (isSetupCancelledError(e)) {
+        process.exit(0);
+      }
+      ui.error(e.message);
+      process.exit(1);
+    }
   }
 
   // Build config overrides from flags
@@ -187,6 +204,9 @@ async function main(): Promise<void> {
   try {
     config = await loadConfig(overrides);
   } catch (e: any) {
+    if (isSetupCancelledError(e)) {
+      process.exit(0);
+    }
     ui.error(e.message);
     process.exit(1);
   }

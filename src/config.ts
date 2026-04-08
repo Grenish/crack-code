@@ -1,6 +1,7 @@
 import { mkdir } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
+import * as p from "@clack/prompts";
 import pc from "picocolors";
 
 import type { ModelInfo } from "./providers/types";
@@ -85,6 +86,17 @@ interface StoredConfig {
   vertexPrivateKey?: string;
 }
 
+interface ProviderSetupResult {
+  apiKey: string;
+  location?: string;
+  model: string;
+  project?: string;
+  provider: Config["provider"];
+  resourceName?: string;
+  vertexClientEmail?: string;
+  vertexPrivateKey?: string;
+}
+
 export interface ConfigOverrides {
   provider?: string;
   model?: string;
@@ -95,6 +107,19 @@ export interface ConfigOverrides {
   allowEdits?: boolean;
   scanPatterns?: string[];
   ignorePatterns?: string[];
+}
+
+export class SetupCancelledError extends Error {
+  constructor() {
+    super("Setup cancelled.");
+    this.name = "SetupCancelledError";
+  }
+}
+
+export function isSetupCancelledError(
+  error: unknown,
+): error is SetupCancelledError {
+  return error instanceof SetupCancelledError;
 }
 
 // constants
@@ -157,6 +182,65 @@ const DEFAULT_IGNORE_PATTERNS = [
   "target/**",
 ];
 
+function abortSetup(): never {
+  p.cancel("Setup cancelled.");
+  throw new SetupCancelledError();
+}
+
+function unwrapPrompt<T>(value: T | symbol): T {
+  if (p.isCancel(value)) {
+    abortSetup();
+  }
+
+  return value as T;
+}
+
+async function promptText(
+  message: string,
+  options: {
+    placeholder?: string;
+    initialValue?: string;
+    validate?: (value: string) => string | Error | undefined;
+  } = {},
+): Promise<string> {
+  const { validate, ...rest } = options;
+  const value = unwrapPrompt(
+    await p.text({
+      message,
+      ...rest,
+      validate: validate
+        ? (value) => validate(value ?? "")
+        : undefined,
+    }),
+  );
+
+  return value.trim();
+}
+
+async function promptSecret(
+  message: string,
+  validate?: (value: string) => string | Error | undefined,
+): Promise<string> {
+  const value = unwrapPrompt(
+    await p.text({
+      message,
+      validate: validate
+        ? (value) => validate(value ?? "")
+        : undefined,
+    }),
+  );
+
+  return value.trim();
+}
+
+async function promptConfirm(message: string): Promise<boolean> {
+  return unwrapPrompt(
+    await p.confirm({
+      message,
+    }),
+  );
+}
+
 // Stored config (read/write)
 async function readStoredConfig(): Promise<StoredConfig | null> {
   const file = Bun.file(CONFIG_PATH);
@@ -196,7 +280,7 @@ interface FetchModelsContext {
   vertexPrivateKey?: string;
 }
 
-async function fetchModels(
+export async function fetchModels(
   provider: Config["provider"],
   apiKey: string,
   ctx: FetchModelsContext = {},
@@ -561,6 +645,7 @@ function maskSecret(value: string): string {
 
 async function selectProvider(
   initialProvider?: Config["provider"],
+  message?: string,
 ): Promise<Config["provider"]> {
   const providerDescriptions: Record<Config["provider"], string> = {
     anthropic: "Claude models for deep security reasoning and code review",
@@ -581,15 +666,19 @@ async function selectProvider(
     }),
   );
 
-  const initialIndex = initialProvider
-    ? Math.max(0, PROVIDERS.indexOf(initialProvider))
-    : 0;
-
-  return await selectMenu(
-    "Provider",
-    "Choose the default backend",
-    options,
-    initialIndex,
+  return unwrapPrompt(
+    await p.select({
+      message:
+        message ??
+        (initialProvider
+          ? `Choose the default backend (current: ${providerLabel(initialProvider)})`
+          : "Choose the default backend"),
+      options: options.map((option) => ({
+        value: option.value,
+        label: option.label,
+        hint: option.description ?? option.meta,
+      })),
+    }),
   );
 }
 
@@ -623,117 +712,59 @@ async function selectModel(
       )
     : 0;
 
-  const selected = await selectMenu(
-    "Model",
-    "Pick the default model for scans",
-    options,
-    initialIndex === -1 ? 0 : initialIndex,
+  const selected = unwrapPrompt(
+    await p.select({
+      message: currentModel
+        ? `Pick the default model for scans (current: ${currentModel})`
+        : "Pick the default model for scans",
+      options: options.map((option) => ({
+        value: option.value,
+        label: option.label,
+        hint: option.description ?? option.meta,
+      })),
+    }),
   );
 
   if (selected === customValue) {
-    const customModel = await prompt(
-      `${ANSI.bold}${ANSI.cyan}Custom model name${ANSI.reset}: `,
-    );
-    if (!customModel) {
-      throw new Error("Model is required.");
-    }
-    return customModel;
+    return await promptText("Custom model name", {
+      initialValue: currentModel,
+      validate: (value) =>
+        value.trim().length === 0 ? "Model is required." : undefined,
+    });
   }
 
   return selected;
 }
 
-function printSetupSummary(stored: StoredConfig): void {
-  const lines = [
-    ...(stored.userName
-      ? [`${ANSI.white}User${ANSI.reset}       ${stored.userName}`]
-      : []),
-    `${ANSI.white}Provider${ANSI.reset}   ${providerLabel(stored.provider)} ${ANSI.gray}(${stored.provider})${ANSI.reset}`,
-    `${ANSI.white}Model${ANSI.reset}      ${stored.model}`,
-    `${ANSI.white}Auth${ANSI.reset}       ${
-      stored.provider === "vertex"
-        ? "Google service account"
-        : `API key ${ANSI.gray}${maskSecret(stored.apiKey)}${ANSI.reset}`
-    }`,
-    ...(stored.resourceName
-      ? [`${ANSI.white}Resource${ANSI.reset}   ${stored.resourceName}`]
-      : []),
-    ...(stored.project
-      ? [`${ANSI.white}Project${ANSI.reset}    ${stored.project}`]
-      : []),
-    ...(stored.location
-      ? [`${ANSI.white}Location${ANSI.reset}   ${stored.location}`]
-      : []),
-    `${ANSI.white}Config${ANSI.reset}     ${CONFIG_PATH}`,
-  ];
-
-  setupBox("Configuration saved", lines);
-}
-
-// first run startup
-async function firstRunSetup(): Promise<StoredConfig> {
-  const existing = await readStoredConfig();
-
-  console.log();
-  console.log(`${ANSI.cyan}${CrackCodeLogo()}${ANSI.reset}`);
-  console.log(setupRule());
-  setupBox("Welcome", [
-    `${ANSI.white}Configure Crack Code for vulnerability scanning and agent-assisted code review.${ANSI.reset}`,
-    `${ANSI.gray}Your selections will be saved to ~/.crack-code/config.json and can be changed anytime with:${ANSI.reset}`,
-    `${ANSI.cyan}  crack-code --setup${ANSI.reset}`,
-  ]);
-
-  setupSection(
-    "1. Setup profile",
-    "Start with your name so Crack Code can personalize the agent context",
-  );
-  let userName = "";
-  while (!userName) {
-    const answer = await prompt(
-      `${ANSI.bold}${ANSI.cyan}Your name${ANSI.reset}${existing?.userName ? ` ${ANSI.gray}[${existing.userName}]${ANSI.reset}` : ""}: `,
-    );
-    userName = answer || existing?.userName || "";
-    if (!userName) {
-      setupError("Your name is required.");
-    }
-  }
-  setupSuccess(`Hello, ${userName}.`);
-
-  setupSection(
-    "2. Choose a provider",
-    "Use arrow keys to pick the default backend",
-  );
-  const provider = await selectProvider(existing?.provider);
-  setupSuccess(`Selected ${providerLabel(provider)}.`);
-
-  // Provider-specific credential gathering
+async function configureProviderSettings(
+  provider: Config["provider"],
+  existing?: StoredConfig | null,
+): Promise<ProviderSetupResult> {
   let apiKey = "";
   let resourceName: string | undefined;
   let project: string | undefined;
   let location: string | undefined;
-
-  // Vertex service account fields (populated below if provider is vertex)
   let vertexClientEmail: string | undefined;
   let vertexPrivateKey: string | undefined;
 
-  setupSection(
-    "3. Configure authentication",
-    `Set up credentials for ${providerLabel(provider)}`,
-  );
+  p.log.step(`Authentication for ${providerLabel(provider)}`);
 
   if (provider === "vertex") {
-    setupBox("Vertex AI setup", [
-      `${ANSI.white}Vertex AI uses a Google Cloud service account JSON.${ANSI.reset}`,
-      `${ANSI.gray}Create or download a service account key, then provide the local JSON file path.${ANSI.reset}`,
-      `${ANSI.gray}Docs: https://console.cloud.google.com/iam-admin/serviceaccounts${ANSI.reset}`,
-    ]);
-
-    const saPath = await prompt(
-      `${ANSI.bold}${ANSI.cyan}Service account JSON path${ANSI.reset}: `,
+    p.log.info(
+      [
+        "Vertex AI uses a Google Cloud service account JSON.",
+        "Create or download a service account key, then provide the local JSON file path.",
+        "Docs: https://console.cloud.google.com/iam-admin/serviceaccounts",
+      ].join("\n"),
     );
-    if (!saPath) {
-      throw new Error("Service account JSON path is required for Vertex AI.");
-    }
+
+    const saPath = await promptText("Service account JSON path", {
+      placeholder: "~/.config/gcloud/service-account.json",
+      validate: (value) =>
+        value.trim().length === 0
+          ? "Service account JSON path is required for Vertex AI."
+          : undefined,
+    });
 
     let saJson: {
       client_email?: string;
@@ -762,87 +793,88 @@ async function firstRunSetup(): Promise<StoredConfig> {
     project =
       saJson.project_id ??
       process.env.GOOGLE_CLOUD_PROJECT ??
-      (await prompt(
-        `\n${ANSI.bold}${ANSI.cyan}Google Cloud project ID${ANSI.reset}: `,
-      ));
+      (await promptText("Google Cloud project ID", {
+        validate: (value) =>
+          value.trim().length === 0
+            ? "Project ID is required for Vertex AI."
+            : undefined,
+      }));
     if (!project) throw new Error("Project ID is required for Vertex AI.");
 
     location =
       (process.env.GOOGLE_CLOUD_LOCATION ??
-        (await prompt(
-          `${ANSI.bold}${ANSI.cyan}Location${ANSI.reset} ${ANSI.gray}[us-central1]${ANSI.reset}: `,
-        ))) ||
+        (await promptText("Location", {
+          initialValue: existing?.location ?? "us-central1",
+        }))) ||
       "us-central1";
 
     apiKey = "service-account";
 
-    setupSuccess(`Service account loaded: ${vertexClientEmail}`);
+    p.log.success(`Service account loaded: ${vertexClientEmail}`);
   } else if (provider === "azure") {
     const envKey = process.env.AZURE_API_KEY;
 
     if (envKey) {
-      const masked = envKey.slice(0, 8) + "..." + envKey.slice(-4);
-      setupHint(`Found AZURE_API_KEY in your environment (${masked}).`);
-      const useEnv = await prompt(
-        `${ANSI.bold}${ANSI.cyan}Use detected API key?${ANSI.reset} ${ANSI.gray}[Y/n]${ANSI.reset}: `,
+      p.log.info(
+        `Detected AZURE_API_KEY in your environment (${maskSecret(envKey)}).`,
       );
-      apiKey =
-        !useEnv || useEnv.toLowerCase() === "y"
-          ? envKey
-          : await prompt(
-              `${ANSI.bold}${ANSI.cyan}Azure API key${ANSI.reset}: `,
-            );
+      const useEnv = await promptConfirm("Use the detected Azure API key?");
+      apiKey = useEnv
+        ? envKey
+        : await promptSecret("Azure API key", (value) =>
+            value.trim().length === 0 ? "API key is required." : undefined,
+          );
     } else {
-      apiKey = await prompt(
-        `${ANSI.bold}${ANSI.cyan}Azure API key${ANSI.reset}: `,
+      apiKey = await promptSecret("Azure API key", (value) =>
+        value.trim().length === 0 ? "API key is required." : undefined,
       );
     }
     if (!apiKey) throw new Error("API key is required.");
 
     resourceName =
       process.env.AZURE_RESOURCE_NAME ??
-      (await prompt(
-        `${ANSI.bold}${ANSI.cyan}Azure resource name${ANSI.reset}: `,
-      ));
+      (await promptText("Azure resource name", {
+        validate: (value) =>
+          value.trim().length === 0
+            ? "Resource name is required for Azure OpenAI."
+            : undefined,
+      }));
     if (!resourceName) {
       throw new Error("Resource name is required for Azure OpenAI.");
     }
 
-    setupSuccess("Azure credentials captured.");
+    p.log.success("Azure credentials captured.");
   } else {
     const envKey = process.env[API_KEY_ENV[provider]];
 
     if (envKey) {
-      const masked = envKey.slice(0, 8) + "..." + envKey.slice(-4);
-      setupHint(
-        `Found ${API_KEY_ENV[provider]} in your environment (${masked}).`,
+      p.log.info(
+        `Detected ${API_KEY_ENV[provider]} in your environment (${maskSecret(envKey)}).`,
       );
-      const useEnv = await prompt(
-        `${ANSI.bold}${ANSI.cyan}Use detected API key?${ANSI.reset} ${ANSI.gray}[Y/n]${ANSI.reset}: `,
-      );
-      if (!useEnv || useEnv.toLowerCase() === "y") {
+      const useEnv = await promptConfirm("Use the detected API key?");
+      if (useEnv) {
         apiKey = envKey;
       } else {
-        apiKey = await prompt(`${ANSI.bold}${ANSI.cyan}API key${ANSI.reset}: `);
+        apiKey = await promptSecret(`${providerLabel(provider)} API key`, (
+          value,
+        ) => (value.trim().length === 0 ? "API key is required." : undefined));
       }
     } else {
-      apiKey = await prompt(
-        `${ANSI.bold}${ANSI.cyan}${providerLabel(provider)} API key${ANSI.reset}: `,
-      );
+      apiKey = await promptSecret(`${providerLabel(provider)} API key`, (
+        value,
+      ) => (value.trim().length === 0 ? "API key is required." : undefined));
     }
 
     if (!apiKey) {
       throw new Error("API key is required.");
     }
 
-    setupSuccess(`${providerLabel(provider)} credentials captured.`);
+    p.log.success(`${providerLabel(provider)} credentials captured.`);
   }
 
-  setupSection(
-    "4. Choose a model",
-    "Use arrow keys to pick a default model for interactive scans",
-  );
-  const loading = spinner("Fetching available models...");
+  p.log.step("Model");
+  const loading = p.spinner();
+  loading.start("Fetching available models...");
   const models = await fetchModels(provider, apiKey, {
     resourceName,
     project,
@@ -850,42 +882,102 @@ async function firstRunSetup(): Promise<StoredConfig> {
     vertexClientEmail,
     vertexPrivateKey,
   });
-  loading.stop();
+  loading.stop(
+    models.length > 0
+      ? `Loaded ${Math.min(models.length, 30)} model options`
+      : "Model lookup finished",
+  );
 
   let model: string;
 
   if (models.length > 0) {
-    model = await selectModel(models, existing?.model);
+    model = await selectModel(models, existing?.provider === provider ? existing.model : undefined);
   } else {
-    setupWarn(
+    p.log.warn(
       "Could not fetch models automatically. Enter a model name manually.",
     );
-    model = await prompt(`${ANSI.bold}${ANSI.cyan}Model${ANSI.reset}: `);
-    if (!model) {
-      throw new Error("Model is required.");
-    }
+    model = await promptText("Model", {
+      initialValue: existing?.provider === provider ? existing.model : undefined,
+      validate: (value) =>
+        value.trim().length === 0 ? "Model is required." : undefined,
+    });
   }
 
-  const stored: StoredConfig = {
-    userName,
-    provider,
-    model,
+  return {
     apiKey,
+    model,
+    provider,
     ...(resourceName ? { resourceName } : {}),
     ...(project ? { project } : {}),
     ...(location && location !== "us-central1" ? { location } : {}),
     ...(vertexClientEmail ? { vertexClientEmail } : {}),
     ...(vertexPrivateKey ? { vertexPrivateKey } : {}),
   };
+}
+
+function printSetupSummary(stored: StoredConfig): void {
+  const lines = [
+    ...(stored.userName ? [`User: ${stored.userName}`] : []),
+    `Provider: ${providerLabel(stored.provider)} (${stored.provider})`,
+    `Model: ${stored.model}`,
+    `Auth: ${
+      stored.provider === "vertex"
+        ? "Google service account"
+        : `API key ${maskSecret(stored.apiKey)}`
+    }`,
+    ...(stored.resourceName ? [`Resource: ${stored.resourceName}`] : []),
+    ...(stored.project ? [`Project: ${stored.project}`] : []),
+    ...(stored.location ? [`Location: ${stored.location}`] : []),
+    `Config: ${CONFIG_PATH}`,
+  ];
+
+  p.log.info(`Configuration saved\n${lines.join("\n")}`);
+}
+
+// first run startup
+async function firstRunSetup(): Promise<StoredConfig> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      "Initial setup requires an interactive terminal. Run `crack-code --setup` in a TTY session.",
+    );
+  }
+
+  const existing = await readStoredConfig();
+
+  console.log();
+  console.log(pc.cyan(CrackCodeLogo()));
+  p.intro("Crack Code setup");
+  p.log.info(
+    [
+      "Configure Crack Code for vulnerability scanning and agent-assisted code review.",
+      "Your selections are saved to ~/.crack-code/config.json.",
+      "Run `crack-code --setup` anytime to change them.",
+    ].join("\n"),
+  );
+
+  p.log.step("Profile");
+  const userName = await promptText("Your name", {
+    initialValue: existing?.userName,
+    placeholder: "Your name",
+    validate: (value) =>
+      value.trim().length === 0 ? "Your name is required." : undefined,
+  });
+  p.log.success(`Hello, ${userName}.`);
+
+  p.log.step("Provider");
+  const provider = await selectProvider(existing?.provider);
+  p.log.success(`Selected ${providerLabel(provider)}.`);
+  const providerSetup = await configureProviderSettings(provider, existing);
+
+  const stored: StoredConfig = {
+    userName,
+    ...providerSetup,
+  };
 
   await writeStoredConfig(stored);
 
-  console.log();
   printSetupSummary(stored);
-  console.log(
-    `${ANSI.green}✓${ANSI.reset} ${ANSI.white}Ready.${ANSI.reset} Start scanning with ${ANSI.cyan}crack-code${ANSI.reset}`,
-  );
-  console.log();
+  p.outro("Ready. Start scanning with `crack-code`.");
 
   return stored;
 }
@@ -1019,11 +1111,43 @@ export async function runSetup(): Promise<void> {
   await firstRunSetup();
 }
 
+export async function runProviderSetup(): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(
+      "Provider setup requires an interactive terminal. Run it in a TTY session.",
+    );
+  }
+
+  const existing = await readStoredConfig();
+  if (!existing) {
+    await firstRunSetup();
+    return;
+  }
+
+  const provider = await selectProvider(
+    existing.provider,
+    existing.provider
+      ? `Choose a provider (current: ${providerLabel(existing.provider)})`
+      : "Choose a provider",
+  );
+  p.log.success(`Selected ${providerLabel(provider)}.`);
+
+  const providerSetup = await configureProviderSettings(provider, existing);
+  const stored: StoredConfig = {
+    ...existing,
+    ...providerSetup,
+  };
+
+  await writeStoredConfig(stored);
+  printSetupSummary(stored);
+  p.outro(`Provider updated: ${providerLabel(provider)}.`);
+}
+
 export async function updateStoredConfig(
   updates: Partial<StoredConfig>,
 ): Promise<void> {
   const existing = (await readStoredConfig()) ?? ({} as StoredConfig);
   const merged = { ...existing, ...updates };
   await writeStoredConfig(merged);
-  setupSuccess("Config updated");
+  p.log.success("Config updated");
 }
