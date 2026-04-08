@@ -26,10 +26,15 @@ export async function fetchAzureModels(
   };
 
   return data.data
-    .filter((d) => d.status === "succeeded")
+    .filter((d) => d.status.toLowerCase() === "succeeded")
     .map((d) => ({
       id: d.id,
       name: d.model !== d.id ? `${d.id} (${d.model})` : d.id,
     }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) =>
+      a.id.localeCompare(b.id, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    );
 }
