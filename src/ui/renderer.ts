@@ -1,3 +1,5 @@
+import { CrackCodeLogo } from "../logo/crack-code.js";
+
 // ─── ANSI Color Palette ─────────────────────────────────────────────
 
 const C = {
@@ -25,6 +27,9 @@ const C = {
   bgCyan: "\x1b[46m",
   bgGray: "\x1b[100m",
 } as const;
+
+const APP_VERSION = "0.1.1";
+const MAX_SURFACE_WIDTH = 132;
 
 type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
 
@@ -379,33 +384,142 @@ export function clearLine(): void {
   process.stdout.write("\r\x1b[K");
 }
 
+// ─── Layout Helpers ─────────────────────────────────────────────────
+
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleLength(text: string): number {
+  return stripAnsi(text).length;
+}
+
+function padVisible(text: string, width: number): string {
+  const pad = Math.max(0, width - visibleLength(text));
+  return text + " ".repeat(pad);
+}
+
+function truncateVisible(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (visibleLength(text) <= width) return text;
+
+  let out = "";
+  let visible = 0;
+  let i = 0;
+
+  while (i < text.length && visible < Math.max(0, width - 1)) {
+    if (text[i] === "\x1b") {
+      const match = text.slice(i).match(/^\x1b\[[0-9;]*m/);
+      if (match) {
+        out += match[0];
+        i += match[0].length;
+        continue;
+      }
+    }
+
+    out += text[i]!;
+    visible++;
+    i++;
+  }
+
+  return out + "…";
+}
+
+function normalizeCell(text: string, width: number): string {
+  return padVisible(truncateVisible(text, width), width);
+}
+
+function termWidth(): number {
+  return Math.max(80, Math.min(process.stdout.columns || 120, 160));
+}
+
+function panelWidth(): number {
+  return Math.max(
+    68,
+    Math.min((process.stdout.columns || 120) - 2, MAX_SURFACE_WIDTH),
+  );
+}
+
+function rule(width = panelWidth()): string {
+  return `${C.gray}${"─".repeat(width)}${C.reset}`;
+}
+
+function boxedSection(
+  title: string,
+  lines: string[],
+  width = panelWidth(),
+  accent: keyof typeof C = "cyan",
+): string[] {
+  const boxWidth = Math.max(24, width);
+  const inner = Math.max(16, boxWidth - 4);
+  const topPrefix = `${C.gray}╭─ ${C.reset}${C[accent]}${C.bold}${title}${C.reset}${C.gray} `;
+  const topFill = "─".repeat(
+    Math.max(0, boxWidth - visibleLength(topPrefix) - 1),
+  );
+  const out = [`${topPrefix}${topFill}╮${C.reset}`];
+
+  for (const line of lines) {
+    out.push(
+      `${C.gray}│ ${C.reset}${normalizeCell(line, inner)}${C.gray} │${C.reset}`,
+    );
+  }
+
+  out.push(`${C.gray}╰${"─".repeat(boxWidth - 2)}╯${C.reset}`);
+  return out;
+}
+
+function joinColumns(left: string[], right: string[], gap = "  "): string[] {
+  const leftWidth = Math.max(...left.map((l) => visibleLength(l)), 0);
+  const rows = Math.max(left.length, right.length);
+  const out: string[] = [];
+
+  for (let i = 0; i < rows; i++) {
+    const l = left[i] ?? "";
+    const r = right[i] ?? "";
+    out.push(`${padVisible(l, leftWidth)}${gap}${r}`);
+  }
+
+  return out;
+}
+
+function compactPath(cwd: string): string {
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 3) return cwd;
+  return `…/${parts.slice(-3).join("/")}`;
+}
+
 // ─── Tool Call UI ───────────────────────────────────────────────────
 
 export function toolStart(name: string, args?: unknown): void {
   if (activeSpinner) activeSpinner.stop();
-  const summary = args ? truncate(formatArgs(name, args), 100) : "";
-  process.stdout.write(
-    `\n${C.gray}  ╭─ ${C.cyan}${C.bold}${name}${C.reset}${summary ? ` ${C.gray}${summary}` : ""}${C.reset}\n`,
+
+  const width = panelWidth();
+  const summary = composeToolStartSummary(name, args);
+  const line = truncateVisible(
+    `${C.cyan}${C.bold}◆${C.reset} ${C.white}${name}${C.reset} ${C.dim}${summary}${C.reset}`,
+    width,
   );
+
+  process.stdout.write(`${line}\n`);
 }
 
 export function toolEnd(name: string, result: string): void {
   if (activeSpinner) activeSpinner.stop();
-  const lines = result.split("\n");
-  const maxPreview = 6;
-  const preview = lines.slice(0, maxPreview);
 
-  for (const line of preview) {
-    process.stdout.write(`${C.gray}  │${C.reset} ${line}\n`);
+  const width = panelWidth();
+  const lines = summarizeToolResult(name, result, Math.max(20, width - 4));
+
+  const done = truncateVisible(
+    `${C.green}${C.bold}✓${C.reset} ${C.white}${name}${C.reset} ${C.dim}completed${C.reset}`,
+    width,
+  );
+  process.stdout.write(`${done}\n`);
+
+  for (const line of lines) {
+    process.stdout.write(`${truncateVisible(line, width)}\n`);
   }
 
-  if (lines.length > maxPreview) {
-    process.stdout.write(
-      `${C.gray}  │ ${C.dim}… ${lines.length - maxPreview} more lines${C.reset}\n`,
-    );
-  }
-
-  process.stdout.write(`${C.gray}  ╰─ ${C.green}done${C.reset}\n\n`);
+  process.stdout.write("\n");
 }
 
 export function toolBlocked(name: string, reason: string): void {
@@ -469,21 +583,43 @@ export function spinner(text: string): SpinnerHandle {
 
 // ─── Prompts ────────────────────────────────────────────────────────
 
-export function userPrompt(): void {
+export function userPrompt(inputPreview = ""): void {
   if (activeSpinner) activeSpinner.stop();
-  process.stdout.write(`\n${C.bold}${C.blue}❯${C.reset} `);
+
+  const width = panelWidth();
+  const cmd = inputPreview.trimStart();
+
+  const realtimeHint =
+    cmd === "/"
+      ? `${C.dim}commands: /help /clear /usage /mode /model /policy /compact /exit${C.reset}`
+      : cmd.startsWith("?")
+        ? `${C.dim}quick ask mode · type your question and press Enter${C.reset}`
+        : `${C.dim}Type / for commands, ? for quick ask, or describe a scan target…${C.reset}`;
+
+  const left = `${C.bold}${C.cyan}❯${C.reset}`;
+  const composed = `${left} ${realtimeHint}`;
+  const line = truncateVisible(composed, width);
+
+  process.stdout.write(`\n${line}\n`);
+  process.stdout.write(`${C.gray}${"─".repeat(width)}${C.reset}\n`);
+  process.stdout.write(`${C.bold}${C.cyan}❯${C.reset} `);
 }
 
 export function permissionPrompt(name: string, summary: string): void {
   if (activeSpinner) activeSpinner.stop();
+
+  const lines = [
+    `${C.yellow}Permission required${C.reset}`,
+    `Tool   ${C.white}${name}${C.reset}`,
+    summary
+      ? `Action ${C.dim}${summary}${C.reset}`
+      : `${C.dim}Awaiting confirmation for privileged action${C.reset}`,
+    `${C.dim}Choose:${C.reset} ${C.green}y${C.reset}=yes  ${C.red}n${C.reset}=no  ${C.yellow}a${C.reset}=always for this session`,
+  ];
+
   process.stdout.write(
-    `${C.gray}  │${C.reset} ${C.yellow}⚠  Allow ${C.bold}${name}${C.reset}${C.yellow}?${C.reset}  ${C.dim}[${C.green}y${C.dim}]es / [${C.red}n${C.dim}]o / [${C.yellow}a${C.dim}]lways${C.reset}\n`,
+    `\n${boxedSection("Approval", lines, panelWidth(), "yellow").join("\n")}\n`,
   );
-  if (summary) {
-    process.stdout.write(
-      `${C.gray}  │${C.reset}   ${C.dim}${summary}${C.reset}\n`,
-    );
-  }
 }
 
 // ─── Status Messages ───────────────────────────────────────────────
@@ -515,26 +651,95 @@ export function dim(msg: string): void {
 
 // ─── Banner ─────────────────────────────────────────────────────────
 
-export function banner(model: string, mode: string): void {
+export function banner(
+  model: string,
+  mode: string,
+  provider?: string,
+  workspace?: string,
+  policy?: string,
+  messageCount = 0,
+  userName?: string,
+): void {
   if (activeSpinner) activeSpinner.stop();
 
-  const width = 52;
-  const border = `${C.gray}${"─".repeat(width)}${C.reset}`;
+  const cwd = workspace ?? process.cwd();
+  const width = panelWidth();
+  const gap = "    ";
+  const useColumns = width >= 108;
+  const columnWidth = useColumns
+    ? Math.floor((width - visibleLength(gap)) / 2)
+    : width;
+  const logoLines = CrackCodeLogo()
+    .trim()
+    .split("\n")
+    .map((line) => `${C.cyan}${line}${C.reset}`);
+
+  const topBar = `${C.gray}workspace${C.reset} ${C.white}${compactPath(cwd)}${C.reset}   ${C.gray}provider${C.reset} ${C.white}${provider ?? "unknown"}${C.reset}   ${C.gray}policy${C.reset} ${C.white}${policy ?? "ask"}${C.reset}   ${C.dim}v${APP_VERSION}${C.reset}`;
+  const greeting = userName?.trim()
+    ? `Welcome back, ${userName.trim()}.`
+    : "Welcome back.";
+  const title = [
+    `${C.bold}${C.white}${greeting} AI vulnerability scanning shell${C.reset}`,
+    `${C.dim}Focused on security analysis, exploit reasoning, and remediation guidance.${C.reset}`,
+  ];
+
+  const welcome = boxedSection(
+    "Welcome back",
+    [
+      `${C.bold}${C.white}Scan codebases like a dedicated security agent.${C.reset}`,
+      "",
+      `${C.gray}Workspace${C.reset}  ${C.white}${cwd}${C.reset}`,
+      `${C.gray}Provider${C.reset}   ${C.white}${provider ?? "unknown"}${C.reset}`,
+      `${C.gray}Model${C.reset}      ${C.white}${model}${C.reset}`,
+      `${C.gray}Mode${C.reset}       ${mode === "read-only" ? `${C.green}● read-only${C.reset}` : `${C.yellow}● edits enabled${C.reset}`}`,
+      `${C.gray}Policy${C.reset}     ${C.white}${policy ?? "ask"}${C.reset}`,
+    ],
+    columnWidth,
+    "cyan",
+  );
+
+  const tips = boxedSection(
+    "Session",
+    [
+      `${C.white}/help${C.reset}      browse commands`,
+      `${C.white}/policy${C.reset}    review permission mode`,
+      `${C.white}/usage${C.reset}     inspect session tokens`,
+      `${C.white}/compact${C.reset}   shrink context when long`,
+      "",
+      `${C.gray}Messages${C.reset}   ${C.white}${messageCount}${C.reset}`,
+      `${C.gray}Focus${C.reset}      ${C.white}vulnerabilities, insecure flows, secrets, auth flaws${C.reset}`,
+    ],
+    columnWidth,
+    "magenta",
+  );
+
+  const cards = useColumns
+    ? joinColumns(welcome, tips, gap)
+    : [...welcome, "", ...tips];
+
+  const footer = truncateVisible(
+    `${C.gray}model${C.reset} ${C.white}${model}${C.reset}   ${C.gray}mode${C.reset} ${mode === "read-only" ? `${C.green}read-only${C.reset}` : `${C.yellow}edits enabled${C.reset}`}   ${C.gray}messages${C.reset} ${C.white}${String(messageCount)}${C.reset}`,
+    width,
+  );
 
   console.log();
-  console.log(border);
+  console.log(topBar);
+  console.log();
+  for (const line of logoLines) console.log(line);
+  console.log();
+  for (const line of title) console.log(line);
+  console.log();
+  for (const line of cards) console.log(line);
+  console.log();
+  console.log(rule(width));
   console.log(
-    `  ${C.bold}${C.cyan}🔓 Crack Code${C.reset}                ${C.dim}v0.1.0${C.reset}`,
+    truncateVisible(
+      `${C.dim} Ask for a vulnerability scan, threat review, exploit path, or secure remediation guidance.${C.reset}`,
+      width,
+    ),
   );
-  console.log(border);
-  console.log(`  ${C.gray}Model${C.reset}   ${C.white}${model}${C.reset}`);
-  console.log(
-    `  ${C.gray}Mode${C.reset}    ${mode === "read-only" ? `${C.green}● read-only` : `${C.yellow}● edits enabled`}${C.reset}`,
-  );
-  console.log(border);
-  console.log(
-    `  ${C.gray}Type ${C.white}/help${C.gray} for commands, ${C.white}/exit${C.gray} to quit${C.reset}`,
-  );
+  console.log(rule(width));
+  console.log(footer);
   console.log();
 }
 
@@ -561,4 +766,91 @@ function formatArgs(toolName: string, args: unknown): string {
     default:
       return truncate(JSON.stringify(args), 100);
   }
+}
+
+function composeToolStartSummary(name: string, args?: unknown): string {
+  const summary = args ? formatArgs(name, args) : "";
+  if (!summary) return "preparing";
+
+  switch (name) {
+    case "list_files":
+      return `list ${truncate(summary, 80)}`;
+    case "read_file":
+      return `read ${truncate(summary, 80)}`;
+    case "write_file":
+      return `write ${truncate(summary, 80)}`;
+    case "run_command":
+      return `run ${truncate(summary, 80)}`;
+    default:
+      return truncate(summary, 80);
+  }
+}
+
+function summarizeToolResult(
+  name: string,
+  result: string,
+  width: number,
+): string[] {
+  const clean = result.replace(/\r/g, "");
+  const lines = clean.split("\n").filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return [`${C.dim}no output${C.reset}`];
+  }
+
+  if (name === "list_files") {
+    const header =
+      lines.find((line) => /^Found\s+\d+/.test(line)) ??
+      lines.find((line) => /No files matched/.test(line)) ??
+      lines[0]!;
+    const fileLines = lines.filter(
+      (line) =>
+        !/^Found\s+\d+/.test(line) &&
+        !/^No files matched/.test(line) &&
+        !/^Error:/.test(line),
+    );
+    const preview = fileLines
+      .slice(0, 4)
+      .map(
+        (line) =>
+          `${C.gray}•${C.reset} ${truncate(line, Math.max(20, width - 4))}`,
+      );
+    const more =
+      fileLines.length > 4
+        ? [`${C.dim}… ${fileLines.length - 4} more${C.reset}`]
+        : [];
+
+    return [
+      `${C.white}${truncate(header, width)}${C.reset}`,
+      ...preview,
+      ...more,
+    ];
+  }
+
+  if (name === "read_file") {
+    const header = lines[0] ?? "File read complete";
+    const numbered = lines.filter((line) => /^\s*\d+\s*[│|]/.test(line));
+    const preview = numbered
+      .slice(0, 4)
+      .map((line) => `${C.gray}${truncate(line, width)}${C.reset}`);
+
+    const headerMore = lines.find((line) => /more lines|truncated/i.test(line));
+    const extra =
+      headerMore ??
+      (numbered.length > 4 ? `… ${numbered.length - 4} more lines` : "");
+
+    return [
+      `${C.white}${truncate(header, width)}${C.reset}`,
+      ...(preview.length > 0
+        ? preview
+        : [`${C.dim}preview unavailable${C.reset}`]),
+      ...(extra ? [`${C.dim}${truncate(extra, width)}${C.reset}`] : []),
+    ];
+  }
+
+  const preview = lines.slice(0, 4).map((line) => truncate(line, width));
+  const more =
+    lines.length > 4 ? [`${C.dim}… ${lines.length - 4} more${C.reset}`] : [];
+
+  return [...preview, ...more];
 }
