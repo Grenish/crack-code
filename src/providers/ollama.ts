@@ -2,6 +2,20 @@ import type { ModelInfo } from "./types";
 
 const DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434";
 
+function buildOllamaDisplayName(model: {
+  name: string;
+  details?: {
+    family?: string;
+    parameter_size?: string;
+  };
+}): string {
+  const parts = [model.details?.family, model.details?.parameter_size].filter(
+    Boolean,
+  );
+
+  return parts.length > 0 ? `${model.name} (${parts.join(", ")})` : model.name;
+}
+
 export async function fetchOllamaModels(
   endpoint?: string,
 ): Promise<ModelInfo[]> {
@@ -25,9 +39,7 @@ export async function fetchOllamaModels(
   return data.models
     .map((m) => ({
       id: m.name,
-      name: m.details?.parameter_size
-        ? `${m.name} (${m.details.parameter_size})`
-        : m.name,
+      name: buildOllamaDisplayName(m),
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
 }
