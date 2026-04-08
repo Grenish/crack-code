@@ -1,4 +1,3 @@
-import * as readline from "node:readline";
 import type { ModelMessage, LanguageModel } from "ai";
 import type { Config } from "./config.js";
 import type { ToolRegistry } from "./tools/registry.js";
@@ -17,12 +16,17 @@ interface ReplContext {
   totalUsage: TokenUsage;
 }
 
-// Slash Commands
-
 interface SlashCommand {
   description: string;
   handler: (ctx: ReplContext, args: string) => void | Promise<void>;
 }
+
+interface InputController {
+  readLine: () => Promise<string>;
+  close: () => void;
+}
+
+// Slash Commands
 
 const commands: Record<string, SlashCommand> = {
   "/help": {
@@ -116,7 +120,6 @@ const commands: Record<string, SlashCommand> = {
 
       const loading = ui.spinner("Compacting conversation...");
 
-      // Keep the last exchange, summarize everything before it
       const toSummarize = ctx.messages.slice(0, -2);
       const recent = ctx.messages.slice(-2);
 
@@ -146,32 +149,248 @@ const commands: Record<string, SlashCommand> = {
   },
 };
 
-// Input Handling
+// Input handling: raw-mode realtime line editor with lightweight hints
 
-function createInput(): {
-  readLine: () => Promise<string>;
-  close: () => void;
-} {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
+function createInput(): InputController {
+  const stdin = process.stdin;
+  const stdout = process.stdout;
 
-  // Handle Ctrl+C gracefully
-  rl.on("SIGINT", () => {
-    console.log();
-    ui.info("Goodbye.");
-    process.exit(0);
-  });
+  const isTTY = Boolean(stdin.isTTY && stdout.isTTY);
+  let closed = false;
+
+  let pendingResolve: ((line: string) => void) | null = null;
+  let line = "";
+  let cursor = 0;
+
+  let activeHint = "";
+
+  const commandHints = [
+    "/help  show commands",
+    "/clear clear history",
+    "/usage session tokens",
+    "/mode  toggle read-only/edit",
+    "/model show model",
+    "/policy set permission mode",
+    "/compact shrink context",
+    "/exit  quit",
+  ];
+
+  const cleanupTerminalState = () => {
+    if (!isTTY) return;
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      // ignore
+    }
+    stdin.pause();
+    stdout.write("\n");
+  };
+
+  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+  const visibleLen = (s: string): number => stripAnsi(s).length;
+
+  const clearPromptRegion = () => {
+    // Clear exactly the two prompt lines (input + hint), then return to input row.
+    stdout.write("\r\x1b[2K"); // clear current line
+    stdout.write("\x1b[1B\r\x1b[2K"); // clear next line
+    stdout.write("\x1b[1A\r"); // back to input line start
+  };
+
+  const renderInput = () => {
+    if (!pendingResolve || !isTTY) return;
+
+    const termWidth = Math.max(40, stdout.columns || 120);
+    const commandMode = line.startsWith("/");
+    const askMode = line.startsWith("?");
+
+    if (commandMode) {
+      if (line.trim() === "/") {
+        activeHint = `\x1b[90m${commandHints.join("   \x1b[2m|\x1b[0m \x1b[90m")}\x1b[0m`;
+      } else {
+        const needle = line.trim().toLowerCase();
+        const matches = Object.keys(commands)
+          .filter((c) => c.startsWith(needle))
+          .slice(0, 6);
+
+        if (matches.length > 0) {
+          activeHint = `\x1b[90m${matches
+            .map((m) => `${m} — ${commands[m]?.description ?? ""}`)
+            .join("   \x1b[2m|\x1b[0m \x1b[90m")}\x1b[0m`;
+        } else {
+          activeHint = "\x1b[90mNo matching command. Try /help\x1b[0m";
+        }
+      }
+    } else if (askMode) {
+      activeHint =
+        "\x1b[90mQuick ask mode: ask a short question and press Enter\x1b[0m";
+    } else {
+      activeHint =
+        "\x1b[90mType / for commands, ? for quick ask, Enter to send\x1b[0m";
+    }
+
+    const prompt = "\x1b[1m\x1b[36m❯\x1b[0m ";
+    // Draw input + hint on a fixed 2-line surface so keystrokes don't stack lines.
+    clearPromptRegion();
+
+    let hint = activeHint;
+    if (visibleLen(hint) > termWidth) {
+      const plain = stripAnsi(hint);
+      hint = `\x1b[90m${plain.slice(0, Math.max(0, termWidth - 1))}…\x1b[0m`;
+    }
+
+    const promptVisible = visibleLen(prompt);
+    const inputWidth = Math.max(10, termWidth - promptVisible);
+    let displayStart = 0;
+
+    if (line.length > inputWidth) {
+      if (cursor <= inputWidth) {
+        displayStart = 0;
+      } else if (cursor >= line.length - 1) {
+        displayStart = line.length - inputWidth;
+      } else {
+        displayStart = Math.max(0, cursor - Math.floor(inputWidth / 2));
+        if (displayStart + inputWidth > line.length) {
+          displayStart = line.length - inputWidth;
+        }
+      }
+    }
+
+    const displayLine = line.slice(displayStart, displayStart + inputWidth);
+
+    stdout.write(`${prompt}${displayLine}\n`);
+    stdout.write(`${hint}`);
+    stdout.write("\x1b[1A\r"); // back to input line start
+    stdout.write(prompt);
+
+    const cursorInWindow = Math.max(0, cursor - displayStart);
+    if (cursorInWindow > 0) {
+      stdout.write(`\x1b[${cursorInWindow}C`);
+    }
+  };
+
+  const finishLine = (value: string) => {
+    const resolve = pendingResolve;
+    pendingResolve = null;
+    line = "";
+    cursor = 0;
+    activeHint = "";
+    // Move from input line to hint line, then to a fresh line below the fixed 2-line surface.
+    stdout.write("\x1b[1B\r\x1b[K\n");
+    resolve?.(value.trim());
+  };
+
+  const onData = (chunk: Buffer | string) => {
+    if (!pendingResolve) return;
+    const s = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i]!;
+
+      // Ctrl+C
+      if (ch === "\u0003") {
+        cleanupTerminalState();
+        ui.info("Goodbye.");
+        process.exit(0);
+      }
+
+      // Enter
+      if (ch === "\r" || ch === "\n") {
+        finishLine(line);
+        return;
+      }
+
+      // Backspace / DEL
+      if (ch === "\u007f" || ch === "\b") {
+        if (cursor > 0) {
+          line = line.slice(0, cursor - 1) + line.slice(cursor);
+          cursor--;
+          renderInput();
+        }
+        continue;
+      }
+
+      // ESC sequences (arrows)
+      if (ch === "\u001b") {
+        const next1 = s[i + 1];
+        const next2 = s[i + 2];
+        if (next1 === "[") {
+          if (next2 === "D") {
+            // left
+            if (cursor > 0) cursor--;
+            i += 2;
+            renderInput();
+            continue;
+          }
+          if (next2 === "C") {
+            // right
+            if (cursor < line.length) cursor++;
+            i += 2;
+            renderInput();
+            continue;
+          }
+          if (next2 === "H") {
+            // home
+            cursor = 0;
+            i += 2;
+            renderInput();
+            continue;
+          }
+          if (next2 === "F") {
+            // end
+            cursor = line.length;
+            i += 2;
+            renderInput();
+            continue;
+          }
+        }
+        continue;
+      }
+
+      // Printable chars
+      if (ch >= " " && ch !== "\u007f") {
+        line = line.slice(0, cursor) + ch + line.slice(cursor);
+        cursor++;
+        renderInput();
+      }
+    }
+  };
+
+  if (isTTY) {
+    stdin.setEncoding("utf8");
+    stdin.resume();
+    stdin.setRawMode(true);
+    stdin.on("data", onData);
+  } else {
+    // Non-TTY fallback: simple line reads from stdin chunks
+    stdin.setEncoding("utf8");
+    stdin.resume();
+    stdin.on("data", onData);
+  }
 
   return {
     readLine: () =>
       new Promise<string>((resolve) => {
-        ui.userPrompt();
-        rl.once("line", (line) => resolve(line.trim()));
+        if (closed) {
+          resolve("");
+          return;
+        }
+
+        pendingResolve = resolve;
+        line = "";
+        cursor = 0;
+
+        ui.userPrompt("");
+        renderInput();
       }),
-    close: () => rl.close(),
+
+    close: () => {
+      if (closed) return;
+      closed = true;
+      pendingResolve = null;
+      stdin.removeListener("data", onData);
+      cleanupTerminalState();
+    },
   };
 }
 
@@ -193,16 +412,30 @@ export async function startRepl(
   };
 
   const mode = config.allowEdits ? "edits enabled" : "read-only";
-  ui.banner(config.model, mode);
+  const workspace = config.cwd;
+  const policy = permissions.getPolicy();
+
+  ui.banner(
+    config.model,
+    mode,
+    config.provider,
+    workspace,
+    policy,
+    ctx.messages.length,
+    config.userName,
+  );
 
   const input = createInput();
 
   while (true) {
-    const line = await input.readLine();
+    const userLine = await input.readLine();
 
-    if (!line) continue;
+    if (!userLine) continue;
 
-    // Slash command
+    const line = userLine.startsWith("?")
+      ? userLine.slice(1).trim() || "Help me with this quickly."
+      : userLine;
+
     const spaceIdx = line.indexOf(" ");
     const cmdName = spaceIdx === -1 ? line : line.slice(0, spaceIdx);
     const cmdArgs = spaceIdx === -1 ? "" : line.slice(spaceIdx + 1).trim();
@@ -219,7 +452,6 @@ export async function startRepl(
       continue;
     }
 
-    // Send to agent
     ctx.messages.push({ role: "user", content: line });
     ui.newline();
 
@@ -251,9 +483,12 @@ export async function startRepl(
               loading.stop();
               firstToken = false;
             }
+            ui.toolStart(name, args);
           },
 
-          onToolEnd: (name, result) => {},
+          onToolEnd: (name, result) => {
+            ui.toolEnd(name, result);
+          },
 
           onUsage: (usage) => {
             ctx.totalUsage.inputTokens += usage.inputTokens;
@@ -268,13 +503,10 @@ export async function startRepl(
         },
       );
 
-      // If spinner never stopped (empty response), stop it now
       if (firstToken) loading.stop();
-
       ui.newline();
     } catch (e: any) {
-      // Agent threw — keep previous messages intact
-      ctx.messages.pop(); // remove the user message that caused the error
+      ctx.messages.pop();
       ui.error(e.message);
     }
   }
