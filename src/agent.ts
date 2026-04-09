@@ -33,6 +33,7 @@ export interface AgentOptions {
   maxSteps?: number;
   maxTokens?: number;
   providerOptions?: unknown;
+  abortSignal?: AbortSignal;
 }
 
 // --- helpers: robust reasoning extraction + <think> fallback parsing ---
@@ -150,6 +151,7 @@ export async function runAgent(
     tools: sdkTools,
     stopWhen: stepCountIs(opts.maxSteps ?? 30),
     maxOutputTokens: opts.maxTokens ?? 16384,
+    abortSignal: opts.abortSignal,
     ...(opts.providerOptions ? { providerOptions: opts.providerOptions as any } : {}),
   });
 
