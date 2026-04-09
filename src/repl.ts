@@ -18,6 +18,7 @@ import { runAgent, type TokenUsage } from "./agent.js";
 import * as ui from "./ui/renderer.js";
 import { launchMarketplaceHub } from "./marketplace/tui.js";
 import type { ToolPackage, InstalledTool } from "./marketplace/types.js";
+import { writeFileTool } from "./tools/file-write.js";
 import { readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 
@@ -67,6 +68,29 @@ function unwrapPrompt<T>(value: T | symbol): T | null {
   }
 
   return value as T;
+}
+
+async function selectPermissionMode(
+  currentAllowEdits: boolean,
+): Promise<"read-only" | "edit" | null> {
+  return unwrapPrompt(
+    await p.select({
+      message: "Choose permission mode",
+      initialValue: currentAllowEdits ? "edit" : "read-only",
+      options: [
+        {
+          value: "read-only",
+          label: "Read-only",
+          hint: "The AI can read and analyze files only",
+        },
+        {
+          value: "edit",
+          label: "Edit",
+          hint: "The AI can modify files in addition to reading them",
+        },
+      ],
+    }),
+  );
 }
 
 async function selectSessionModel(ctx: ReplContext): Promise<string | null> {
@@ -273,10 +297,52 @@ const commands: Record<string, SlashCommand> = {
     },
   },
 
-  "/mode": {
-    description: "Toggle read-only ↔ edit mode",
-    handler: (ctx) => {
-      ctx.config.allowEdits = !ctx.config.allowEdits;
+  "/permission": {
+    description: "Choose read-only or edit mode",
+    handler: async (ctx, args) => {
+      let nextMode: "read-only" | "edit" | null;
+
+      if (args) {
+        const normalized = args.trim().toLowerCase();
+        if (normalized === "read-only" || normalized === "readonly") {
+          nextMode = "read-only";
+        } else if (normalized === "edit") {
+          nextMode = "edit";
+        } else {
+          ui.error("Invalid mode. Use: read-only or edit");
+          return;
+        }
+      } else {
+        nextMode = await ctx.input.suspend(() =>
+          selectPermissionMode(ctx.config.allowEdits),
+        );
+      }
+
+      if (!nextMode) {
+        ui.info(
+          `Current mode: ${ctx.config.allowEdits ? "edit" : "read-only"}`,
+        );
+        return;
+      }
+
+      const allowEdits = nextMode === "edit";
+      if (ctx.config.allowEdits === allowEdits) {
+        ui.info(`Mode already set to ${nextMode}`);
+        return;
+      }
+
+      ctx.config.allowEdits = allowEdits;
+      ctx.permissions.setEditMode(allowEdits);
+
+      if (allowEdits) {
+        if (!ctx.tools.getNames().includes(writeFileTool.name)) {
+          ctx.tools.register(writeFileTool);
+        }
+      } else {
+        ctx.tools.remove(writeFileTool.name);
+      }
+
+      ctx.config = await loadConfig(buildRuntimeOverrides(ctx));
       if (ctx.config.allowEdits) {
         ui.warn("Edit mode enabled. The AI can now modify files.");
       } else {
@@ -443,86 +509,12 @@ const commands: Record<string, SlashCommand> = {
   "/marketplace": {
     description: "Open the community tool marketplace",
     handler: async (ctx) => {
-      // Mock data for Phase 1
-      const mockPackages: ToolPackage[] = [
-        {
-          id: "auth-checker",
-          name: "Auth Checker",
-          version: "1.0.0",
-          description: "Scan for common authentication vulnerabilities",
-          author: "Crack Code Team",
-          license: "MIT",
-          downloads: 156,
-          rating: 4.5,
-          tags: ["security", "auth"],
-          main: "./dist/index.ts",
-          tools: [
-            {
-              id: "check_auth_flaws",
-              name: "Check Auth Flaws",
-              description: "Detect authentication issues",
-              schema: {},
-            },
-          ],
-          permissions: {
-            requiresFileWrite: false,
-            requiresShellAccess: false,
-          },
-        },
-        {
-          id: "sql-injection-detector",
-          name: "SQL Injection Detector",
-          version: "2.1.3",
-          description: "Identify SQL injection vulnerabilities",
-          author: "Security Labs",
-          license: "MIT",
-          downloads: 342,
-          rating: 4.8,
-          tags: ["security", "sql"],
-          main: "./dist/index.ts",
-          tools: [
-            {
-              id: "detect_sql_injection",
-              name: "Detect SQL Injection",
-              description: "Find SQL injection risks",
-              schema: {},
-            },
-          ],
-          permissions: {
-            requiresFileWrite: false,
-            requiresShellAccess: false,
-          },
-        },
-        {
-          id: "xss-scanner",
-          name: "XSS Scanner",
-          version: "1.5.2",
-          description: "Detect cross-site scripting vulnerabilities",
-          author: "Security Labs",
-          license: "MIT",
-          downloads: 289,
-          rating: 4.6,
-          tags: ["security", "xss", "web"],
-          main: "./dist/index.ts",
-          tools: [
-            {
-              id: "scan_xss",
-              name: "Scan XSS",
-              description: "Find XSS vulnerabilities",
-              schema: {},
-            },
-          ],
-          permissions: {
-            requiresFileWrite: false,
-            requiresShellAccess: false,
-          },
-        },
-      ];
-
-      const mockInstalledTools: InstalledTool[] = [];
-
-      await launchMarketplaceHub(mockPackages, mockInstalledTools);
-      ui.success("Returned to REPL.");
+      // Marketplace UI is not yet ready — show coming soon message
+      p.note(
+        "Marketplace coming soon — stay tuned for community tools!",
+        "Marketplace",
+      );
+      return;
     },
   },
 };
@@ -592,10 +584,16 @@ function formatPromptPath(cwd: string, homeDir: string): string {
 
 function padLines(lines: string[], totalRows: number): string[] {
   if (lines.length >= totalRows) return lines;
-  return [...lines, ...Array.from({ length: totalRows - lines.length }, () => "")];
+  return [
+    ...lines,
+    ...Array.from({ length: totalRows - lines.length }, () => ""),
+  ];
 }
 
-function isTrustedCodebase(cwd: string, trusted: string[] | undefined): boolean {
+function isTrustedCodebase(
+  cwd: string,
+  trusted: string[] | undefined,
+): boolean {
   if (!trusted || trusted.length === 0) return false;
   const normalized = resolve(cwd);
   for (const base of trusted) {
@@ -710,7 +708,7 @@ function createInput(
     "/clear",
     "/marketplace",
     "/usage",
-    "/mode",
+    "/permission",
     "/model",
     "/provider",
     "/logo",
@@ -761,7 +759,6 @@ function createInput(
           commandHints.indexOf(a.name) - commandHints.indexOf(b.name)
         );
       })
-      .slice(0, 8);
 
     return { query, hasArgs, entries };
   };
@@ -999,24 +996,18 @@ function createInput(
 
       if (slashMenu && !slashMenu.hasArgs) {
         if (slashMenu.entries.length > 0) {
-          footerLines = padLines(
-            [
-              ...slashMenu.entries.map((entry, index) => {
-                const marker = index === slashSelection ? ">" : " ";
-                return `${marker} ${entry.name.padEnd(14)} ${entry.description}`;
-              }),
-              "↑↓ to choose | Tab to complete | Enter to select",
-            ],
-            9,
-          );
+          footerLines = [
+            ...slashMenu.entries.map((entry, index) => {
+              const marker = index === slashSelection ? ">" : " ";
+              return `${marker} ${entry.name.padEnd(14)} ${entry.description}`;
+            }),
+            "↑↓ to choose | Tab to complete | Enter to select",
+          ];
         } else {
-          footerLines = padLines(
-            [
-              "No matching command",
-              "Tab completes the closest command | /help shows all commands",
-            ],
-            9,
-          );
+          footerLines = [
+            "No matching command",
+            "Tab completes the closest command | /help shows all commands",
+          ];
         }
       } else {
         const commandName = line.trim().split(/\s+/, 1)[0] ?? "";
@@ -1185,7 +1176,7 @@ function createInput(
         continue;
       }
 
-      // Tab autocomplete for slash commands
+      // Tab keeps command completion in the raw prompt and opens clack for file mentions
       if (ch === "\t") {
         const atMenu = getAtMenuState();
         if (atMenu && !atMenu.blocked) {
@@ -1339,10 +1330,7 @@ export async function startRepl(
 ): Promise<void> {
   const shellMeta = await getShellMeta(config.cwd);
 
-  const alreadyTrusted = isTrustedCodebase(
-    config.cwd,
-    config.trustedCodebases,
-  );
+  const alreadyTrusted = isTrustedCodebase(config.cwd, config.trustedCodebases);
   let trustedThisSession = alreadyTrusted;
   let fileIndex: string[] = [];
 
