@@ -2,7 +2,7 @@ import type { ModelMessage, LanguageModel } from "ai";
 import * as p from "@clack/prompts";
 import { stat } from "node:fs/promises";
 import { homedir, hostname, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   fetchModels,
   isSetupCancelledError,
@@ -18,6 +18,8 @@ import { runAgent, type TokenUsage } from "./agent.js";
 import * as ui from "./ui/renderer.js";
 import { launchMarketplaceHub } from "./marketplace/tui.js";
 import type { ToolPackage, InstalledTool } from "./marketplace/types.js";
+import { readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 // Types
 
@@ -45,9 +47,11 @@ interface InputController {
 interface PromptMeta {
   cwd: string;
   isHome: boolean;
+  userHome: string;
+  provider: string;
+  model: string;
   modelLabel: string;
-  mode: string;
-  policy: string;
+  gitBranch: string | null;
 }
 
 interface ShellMeta {
@@ -150,6 +154,82 @@ function buildRuntimeOverrides(ctx: ReplContext) {
 }
 
 // Slash Commands
+
+const LOGO_PATH = resolve(homedir(), ".crack-code", "config.json");
+const DEFAULT_LOGO_PATH = resolve(__dirname, "./logo/logo.md");
+
+async function readLogoFromConfig(): Promise<string | null> {
+  try {
+    const raw = await readFile(LOGO_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as {
+      logo?: string;
+      useDefaultLogo?: boolean;
+    };
+
+    if (parsed.useDefaultLogo) return null;
+
+    const logo = parsed.logo?.trim();
+    return logo ? logo : null;
+  } catch {
+    return null;
+  }
+}
+
+function readDefaultLogo(): string {
+  return readFileSync(DEFAULT_LOGO_PATH, "utf-8");
+}
+
+async function writeLogoToConfig(logo: string | null): Promise<void> {
+  try {
+    const raw = await readFile(LOGO_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const next = {
+      ...parsed,
+      ...(logo === null
+        ? { logo: undefined, useDefaultLogo: true }
+        : { logo, useDefaultLogo: false }),
+    };
+
+    if (logo === null) {
+      delete next.logo;
+    }
+
+    await writeFile(LOGO_PATH, JSON.stringify(next, null, 2) + "\n", "utf-8");
+  } catch {
+    await writeFile(
+      LOGO_PATH,
+      JSON.stringify(
+        logo === null
+          ? { useDefaultLogo: true }
+          : { logo, useDefaultLogo: false },
+        null,
+        2,
+      ) + "\n",
+      "utf-8",
+    );
+  }
+}
+
+async function editLogoInNvimLikePage(ctx: ReplContext): Promise<void> {
+  const current = (await readLogoFromConfig()) ?? readDefaultLogo();
+  console.log();
+  ui.dim("Opening logo editor...");
+  console.log(current);
+  console.log();
+  const next = unwrapPrompt(
+    await p.text({
+      message: "Edit logo markdown",
+      initialValue: current,
+      validate: (value) =>
+        (value ?? "").trim().length === 0 ? "Logo cannot be empty." : undefined,
+    }),
+  );
+
+  if (!next) return;
+
+  await updateStoredConfig({ logo: next });
+  ui.success("Logo updated.");
+}
 
 const commands: Record<string, SlashCommand> = {
   "/help": {
@@ -274,6 +354,31 @@ const commands: Record<string, SlashCommand> = {
           ui.info("Provider setup cancelled.");
           return;
         }
+        ui.error(e.message);
+      }
+    },
+  },
+
+  "/logo": {
+    description: "Edit the current logo",
+    handler: async (ctx) => {
+      try {
+        await ctx.input.suspend(async () => {
+          await editLogoInNvimLikePage(ctx);
+        });
+      } catch (e: any) {
+        ui.error(e.message);
+      }
+    },
+  },
+
+  "/def-logo": {
+    description: "Reset to the default logo",
+    handler: async (ctx) => {
+      try {
+        await updateStoredConfig({ logo: undefined });
+        ui.success("Logo reset to default.");
+      } catch (e: any) {
         ui.error(e.message);
       }
     },
@@ -474,19 +579,131 @@ function formatModelLabel(provider: string, model: string): string {
   return model.includes("/") ? model : `${provider}/${model}`;
 }
 
+function formatPromptPath(cwd: string, homeDir: string): string {
+  if (cwd === homeDir) return "~";
+  if (cwd.startsWith(`${homeDir}/`)) {
+    return `~/${cwd.slice(homeDir.length + 1)}`;
+  }
+
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 3) return cwd;
+  return `…/${parts.slice(-2).join("/")}`;
+}
+
+function padLines(lines: string[], totalRows: number): string[] {
+  if (lines.length >= totalRows) return lines;
+  return [...lines, ...Array.from({ length: totalRows - lines.length }, () => "")];
+}
+
+function isTrustedCodebase(cwd: string, trusted: string[] | undefined): boolean {
+  if (!trusted || trusted.length === 0) return false;
+  const normalized = resolve(cwd);
+  for (const base of trusted) {
+    const b = resolve(base);
+    if (normalized === b) return true;
+    if (normalized.startsWith(b + sep)) return true;
+  }
+  return false;
+}
+
+type TrustChoice = "session" | "parent" | "no";
+
+async function promptTrustCodebase(cwd: string): Promise<TrustChoice> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return "no";
+
+  const parent = dirname(resolve(cwd));
+  const choice = await p.select({
+    message: `Trust this directory for indexing and @ file mentions? (${cwd})`,
+    options: [
+      {
+        value: "session",
+        label: "Trust for this session",
+        hint: "Enables indexing now; nothing is saved",
+      },
+      {
+        value: "parent",
+        label: "Trust parent permanently",
+        hint: `Saves ${parent} to config`,
+      },
+      { value: "no", label: "Do not trust", hint: "No indexing" },
+    ],
+    initialValue: "session",
+  });
+
+  if (p.isCancel(choice)) return "no";
+  return choice as TrustChoice;
+}
+
+function shouldIgnore(path: string, patterns: string[]): boolean {
+  for (const pattern of patterns) {
+    if (pattern.endsWith("/**")) {
+      const dir = pattern.slice(0, -3);
+      if (path === dir || path.startsWith(dir + "/")) return true;
+    }
+
+    if (pattern.startsWith("*.")) {
+      const ext = pattern.slice(1);
+      if (path.endsWith(ext)) return true;
+    }
+
+    if (path === pattern) return true;
+  }
+  return false;
+}
+
+async function indexCodebaseFiles(
+  cwd: string,
+  ignorePatterns: string[],
+): Promise<string[]> {
+  const glob = new Bun.Glob("**/*");
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  for await (const rel of glob.scan({ cwd, dot: false })) {
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    if (shouldIgnore(rel, ignorePatterns)) continue;
+
+    try {
+      const st = await stat(join(cwd, rel));
+      if (!st.isFile()) continue;
+    } catch {
+      continue;
+    }
+
+    out.push(rel);
+    if (out.length >= 5000) break;
+  }
+
+  out.sort();
+  return out;
+}
+
 // Input handling: raw-mode realtime line editor with lightweight hints
 
-function createInput(getPromptMeta: () => PromptMeta): InputController {
+function createInput(
+  getPromptMeta: () => PromptMeta,
+  getFileIndex: () => string[],
+  isTrustedSession: () => boolean,
+  isResponseActive: () => boolean,
+  interruptResponse: () => boolean,
+): InputController {
   const stdin = process.stdin;
   const stdout = process.stdout;
 
   const isTTY = Boolean(stdin.isTTY && stdout.isTTY);
   let closed = false;
   let promptVisible = false;
+  let promptLineCount = 0;
+  let promptCursorRow = 1;
 
   let pendingResolve: ((line: string) => void) | null = null;
   let line = "";
   let cursor = 0;
+  let slashSelection = 0;
+  let slashSelectionQuery = "";
+  let atSelection = 0;
+  let atSelectionQuery = "";
 
   const commandHints = [
     "/help",
@@ -496,10 +713,130 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
     "/mode",
     "/model",
     "/provider",
+    "/logo",
+    "/def-logo",
     "/policy",
     "/compact",
     "/exit",
   ];
+  const commandEntries = commandHints.map((name) => ({
+    name,
+    description: commands[name]?.description ?? "",
+  }));
+
+  const syncSlashSelection = (query: string, count: number) => {
+    if (query !== slashSelectionQuery) {
+      slashSelectionQuery = query;
+      slashSelection = 0;
+    }
+
+    if (count === 0) {
+      slashSelection = 0;
+      return;
+    }
+
+    if (slashSelection >= count) {
+      slashSelection = count - 1;
+    }
+  };
+
+  const getSlashMenuState = () => {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("/")) return null;
+
+    const spaceIndex = trimmed.indexOf(" ");
+    const query = (
+      spaceIndex === -1 ? trimmed : trimmed.slice(0, spaceIndex)
+    ).toLowerCase();
+    const hasArgs = spaceIndex !== -1;
+    const entries = commandEntries
+      .filter((entry) => entry.name.startsWith(query))
+      .sort((a, b) => {
+        if (query === "/") {
+          return commandHints.indexOf(a.name) - commandHints.indexOf(b.name);
+        }
+
+        return (
+          a.name.length - b.name.length ||
+          commandHints.indexOf(a.name) - commandHints.indexOf(b.name)
+        );
+      })
+      .slice(0, 8);
+
+    return { query, hasArgs, entries };
+  };
+
+  const applySelectedSlashCommand = (): boolean => {
+    const menu = getSlashMenuState();
+    if (!menu || menu.hasArgs || menu.entries.length === 0) return false;
+
+    const selected = menu.entries[slashSelection]?.name;
+    if (!selected) return false;
+
+    line = selected;
+    cursor = line.length;
+    return true;
+  };
+
+  const getCurrentToken = () => {
+    const beforeCursor = line.slice(0, cursor);
+    const tokenStart = beforeCursor.lastIndexOf(" ") + 1;
+    const token = line.slice(tokenStart, cursor);
+    return { tokenStart, token };
+  };
+
+  const syncAtSelection = (query: string, count: number) => {
+    if (query !== atSelectionQuery) {
+      atSelectionQuery = query;
+      atSelection = 0;
+    }
+
+    if (count === 0) {
+      atSelection = 0;
+      return;
+    }
+
+    if (atSelection >= count) {
+      atSelection = count - 1;
+    }
+  };
+
+  const getAtMenuState = () => {
+    const { tokenStart, token } = getCurrentToken();
+    if (!token.startsWith("@")) return null;
+
+    const query = token.slice(1);
+    const fileIndex = getFileIndex();
+    if (!isTrustedSession() || fileIndex.length === 0) {
+      return { tokenStart, query, entries: [] as string[], blocked: true };
+    }
+
+    const needle = query.toLowerCase();
+    const entries = fileIndex
+      .filter((p) => p.toLowerCase().includes(needle))
+      .sort((a, b) => {
+        const ap = a.toLowerCase().startsWith(needle) ? 0 : 1;
+        const bp = b.toLowerCase().startsWith(needle) ? 0 : 1;
+        return ap - bp || a.length - b.length || a.localeCompare(b);
+      })
+      .slice(0, 8);
+
+    return { tokenStart, query, entries, blocked: false };
+  };
+
+  const applySelectedAtMention = (picked?: string): boolean => {
+    const menu = getAtMenuState();
+    if (!menu || menu.blocked) return false;
+
+    const selected = picked ?? menu.entries[atSelection];
+    if (!selected) return false;
+
+    const before = line.slice(0, menu.tokenStart);
+    const after = line.slice(cursor);
+    line = `${before}@${selected}${after}`;
+    cursor = (before + "@" + selected).length;
+    return true;
+  };
 
   const getCurrentSlashToken = () => {
     const beforeCursor = line.slice(0, cursor);
@@ -559,6 +896,10 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
   };
 
   const applySlashAutocomplete = (): boolean => {
+    if (applySelectedSlashCommand()) {
+      return true;
+    }
+
     const slashToken = getCurrentSlashToken();
     if (!slashToken) return false;
 
@@ -582,14 +923,46 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
     stdout.write("\n");
   };
 
-  const clearPromptRegion = () => {
-    if (!promptVisible || !isTTY) return;
+  const buildMoveCursorBelowPrompt = () => {
+    let output = "";
+    if (!promptVisible || !isTTY) return output;
 
-    // Cursor rests on the middle line of the 3-line prompt frame.
-    stdout.write("\x1b[1A\r\x1b[2K");
-    stdout.write("\x1b[1B\r\x1b[2K");
-    stdout.write("\x1b[1B\r\x1b[2K");
-    stdout.write("\x1b[2A\r");
+    const down = Math.max(0, promptLineCount - promptCursorRow - 1);
+    if (down > 0) {
+      output += `\x1b[${down}B`;
+    }
+    output += "\r";
+    return output;
+  };
+
+  const moveCursorBelowPrompt = () => {
+    if (!promptVisible || !isTTY) return;
+    stdout.write(buildMoveCursorBelowPrompt());
+    promptVisible = false;
+  };
+
+  const buildClearPromptRegion = () => {
+    if (!promptVisible || !isTTY) return "";
+
+    let output = "";
+
+    if (promptCursorRow > 0) {
+      output += `\x1b[${promptCursorRow}A`;
+    }
+    output += "\r";
+
+    for (let i = 0; i < promptLineCount; i++) {
+      output += "\x1b[2K";
+      if (i < promptLineCount - 1) {
+        output += "\x1b[1B\r";
+      }
+    }
+
+    if (promptLineCount > 1) {
+      output += `\x1b[${promptLineCount - 1}A`;
+    }
+    output += "\r";
+    return output;
   };
 
   const renderInput = () => {
@@ -598,34 +971,82 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
     const commandMode = line.startsWith("/");
     const askMode = line.startsWith("?");
     const promptMeta = getPromptMeta();
+    const promptPath = formatPromptPath(promptMeta.cwd, promptMeta.userHome);
+    const sessionMeta = promptMeta.gitBranch
+      ? `${promptMeta.provider} | ${promptMeta.model} | ${promptPath} > ${promptMeta.gitBranch}`
+      : `${promptMeta.provider} | ${promptMeta.model} | ${promptPath}`;
+    const slashMenu = getSlashMenuState();
+    const atMenu = getAtMenuState();
+
+    if (slashMenu) {
+      syncSlashSelection(slashMenu.query, slashMenu.entries.length);
+    } else {
+      slashSelectionQuery = "";
+      slashSelection = 0;
+    }
+    if (atMenu) {
+      syncAtSelection(atMenu.query, atMenu.entries.length);
+    } else {
+      atSelectionQuery = "";
+      atSelection = 0;
+    }
 
     let placeholder = "Describe a scan target, exploit path, or remediation";
-    let footer = `Type / for commands • ? quick ask • mode ${promptMeta.mode} • policy ${promptMeta.policy}`;
+    let footerLines = [sessionMeta];
 
     if (commandMode) {
       placeholder = "Type a command";
 
-      if (line.trim() === "/") {
-        footer = commandHints.join(" • ");
+      if (slashMenu && !slashMenu.hasArgs) {
+        if (slashMenu.entries.length > 0) {
+          footerLines = padLines(
+            [
+              ...slashMenu.entries.map((entry, index) => {
+                const marker = index === slashSelection ? ">" : " ";
+                return `${marker} ${entry.name.padEnd(14)} ${entry.description}`;
+              }),
+              "↑↓ to choose | Tab to complete | Enter to select",
+            ],
+            9,
+          );
+        } else {
+          footerLines = padLines(
+            [
+              "No matching command",
+              "Tab completes the closest command | /help shows all commands",
+            ],
+            9,
+          );
+        }
       } else {
-        const needle = line.trim().toLowerCase();
-        const matches = Object.keys(commands)
-          .filter((command) => command.startsWith(needle))
-          .slice(0, 6);
-
-        footer =
-          matches.length > 0
-            ? matches.join(" • ")
-            : "No matching command • /help shows all commands";
+        const commandName = line.trim().split(/\s+/, 1)[0] ?? "";
+        const description = commands[commandName]?.description ?? "Run command";
+        footerLines = [`${commandName} | ${description}`, sessionMeta];
       }
     } else if (askMode) {
       placeholder = "Ask a short question";
-      footer = `Quick ask mode • Enter to send • mode ${promptMeta.mode}`;
-    } else if (line.length > 0) {
-      footer = `Enter to send • / commands • ? quick ask • mode ${promptMeta.mode} • policy ${promptMeta.policy}`;
+      footerLines = [`quick ask | ${sessionMeta}`];
+    } else if (atMenu) {
+      if (atMenu.blocked) {
+        footerLines = padLines(
+          ["Untrusted directory: @ file picker is disabled", sessionMeta],
+          9,
+        );
+      } else if (atMenu.entries.length > 0) {
+        footerLines = padLines(
+          [
+            ...atMenu.entries.map((entry, index) => {
+              const marker = index === atSelection ? ">" : " ";
+              return `${marker} @${entry}`;
+            }),
+            "↑↓ to choose | Tab to pick | Enter to select",
+          ],
+          9,
+        );
+      } else {
+        footerLines = padLines(["No matching files", sessionMeta], 9);
+      }
     }
-
-    clearPromptRegion();
 
     const frame = ui.renderPromptFrame({
       cwd: promptMeta.cwd,
@@ -633,18 +1054,64 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
       input: line,
       cursor,
       placeholder,
-      footer,
+      footerLines,
       isHome: promptMeta.isHome,
     });
 
-    stdout.write(frame.lines.join("\n"));
-    stdout.write("\x1b[1A\r");
+    let output = "";
+    output += buildClearPromptRegion();
+    output += frame.lines.join("\n");
+    promptLineCount = frame.lines.length;
+    promptCursorRow = frame.cursorRow;
+
+    const rowsUp = Math.max(0, frame.lines.length - frame.cursorRow - 1);
+    if (rowsUp > 0) {
+      output += `\x1b[${rowsUp}A`;
+    }
+    output += "\r";
 
     if (frame.cursorCol > 0) {
-      stdout.write(`\x1b[${frame.cursorCol}C`);
+      output += `\x1b[${frame.cursorCol}C`;
     }
 
+    stdout.write(output);
     promptVisible = true;
+  };
+
+  const suspendInteractive = async <T>(task: () => Promise<T>): Promise<T> => {
+    if (!isTTY) {
+      return await task();
+    }
+
+    if (promptVisible) {
+      moveCursorBelowPrompt();
+    }
+
+    stdin.removeListener("data", onData);
+
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      // ignore
+    }
+
+    stdin.pause();
+
+    try {
+      return await task();
+    } finally {
+      if (!closed) {
+        stdin.setEncoding("utf8");
+        stdin.resume();
+        try {
+          stdin.setRawMode(true);
+        } catch {
+          // ignore
+        }
+        stdin.on("data", onData);
+        renderInput();
+      }
+    }
   };
 
   const finishLine = (value: string) => {
@@ -652,16 +1119,19 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
     pendingResolve = null;
     line = "";
     cursor = 0;
-    if (promptVisible && isTTY) {
-      stdout.write("\x1b[2B\r");
-      promptVisible = false;
-    }
+    moveCursorBelowPrompt();
     resolve?.(value.trim());
   };
 
-  const onData = (chunk: Buffer | string) => {
-    if (!pendingResolve) return;
+  function onData(chunk: Buffer | string) {
     const s = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+
+    if (!pendingResolve) {
+      if (isResponseActive() && s.includes("\u001b")) {
+        interruptResponse();
+      }
+      return;
+    }
 
     for (let i = 0; i < s.length; i++) {
       const ch = s[i]!;
@@ -675,6 +1145,32 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
 
       // Enter
       if (ch === "\r" || ch === "\n") {
+        const atMenu = getAtMenuState();
+        if (atMenu && !atMenu.blocked && atMenu.entries.length > 0) {
+          const token = getCurrentToken().token;
+          const selected = atMenu.entries[atSelection];
+          const selectedToken = selected ? `@${selected}` : null;
+          if (selectedToken && token !== selectedToken) {
+            if (applySelectedAtMention()) {
+              renderInput();
+            }
+            return;
+          }
+        }
+
+        const slashMenu = getSlashMenuState();
+        if (
+          slashMenu &&
+          !slashMenu.hasArgs &&
+          slashMenu.entries.length > 0 &&
+          line.trim() !== slashMenu.entries[slashSelection]?.name
+        ) {
+          if (applySelectedSlashCommand()) {
+            renderInput();
+          }
+          return;
+        }
+
         finishLine(line);
         return;
       }
@@ -691,6 +1187,30 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
 
       // Tab autocomplete for slash commands
       if (ch === "\t") {
+        const atMenu = getAtMenuState();
+        if (atMenu && !atMenu.blocked) {
+          const fileIndex = getFileIndex();
+          if (fileIndex.length > 0) {
+            if (atMenu.query.length > 0) {
+              if (applySelectedAtMention()) {
+                renderInput();
+              }
+              continue;
+            }
+
+            void suspendInteractive(async () => {
+              const choice = await p.autocomplete({
+                message: "Pick a file to mention",
+                options: fileIndex.map((value) => ({ value, label: value })),
+              });
+
+              if (p.isCancel(choice)) return;
+              applySelectedAtMention(choice as string);
+            });
+            return;
+          }
+        }
+
         if (applySlashAutocomplete()) {
           renderInput();
         }
@@ -702,6 +1222,33 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
         const next1 = s[i + 1];
         const next2 = s[i + 2];
         if (next1 === "[") {
+          if (next2 === "A" || next2 === "B") {
+            const atMenu = getAtMenuState();
+            if (atMenu && !atMenu.blocked && atMenu.entries.length > 0) {
+              const delta = next2 === "A" ? -1 : 1;
+              atSelection =
+                (atSelection + delta + atMenu.entries.length) %
+                atMenu.entries.length;
+              i += 2;
+              renderInput();
+              continue;
+            }
+
+            const slashMenu = getSlashMenuState();
+            if (
+              slashMenu &&
+              !slashMenu.hasArgs &&
+              slashMenu.entries.length > 0
+            ) {
+              const delta = next2 === "A" ? -1 : 1;
+              slashSelection =
+                (slashSelection + delta + slashMenu.entries.length) %
+                slashMenu.entries.length;
+              i += 2;
+              renderInput();
+              continue;
+            }
+          }
           if (next2 === "D") {
             // left
             if (cursor > 0) cursor--;
@@ -741,7 +1288,7 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
         renderInput();
       }
     }
-  };
+  }
 
   if (isTTY) {
     stdin.setEncoding("utf8");
@@ -770,37 +1317,7 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
         renderInput();
       }),
 
-    suspend: async <T>(task: () => Promise<T>): Promise<T> => {
-      if (!isTTY) {
-        return await task();
-      }
-
-      if (promptVisible) {
-        stdout.write("\x1b[2B\r");
-        promptVisible = false;
-      }
-
-      stdin.removeListener("data", onData);
-
-      try {
-        stdin.setRawMode(false);
-      } catch {
-        // ignore
-      }
-
-      stdin.pause();
-
-      try {
-        return await task();
-      } finally {
-        if (!closed) {
-          stdin.setEncoding("utf8");
-          stdin.resume();
-          stdin.setRawMode(true);
-          stdin.on("data", onData);
-        }
-      }
-    },
+    suspend: suspendInteractive,
 
     close: () => {
       if (closed) return;
@@ -821,14 +1338,67 @@ export async function startRepl(
   permissions: PermissionManager,
 ): Promise<void> {
   const shellMeta = await getShellMeta(config.cwd);
-  const input = createInput(() => ({
-    cwd: config.cwd,
-    isHome: config.cwd === shellMeta.userHome,
-    modelLabel: formatModelLabel(config.provider, config.model),
-    mode: ctx.config.allowEdits ? "edits enabled" : "read-only",
-    policy: ctx.permissions.getPolicy(),
-  }));
-  const ctx: ReplContext = {
+
+  const alreadyTrusted = isTrustedCodebase(
+    config.cwd,
+    config.trustedCodebases,
+  );
+  let trustedThisSession = alreadyTrusted;
+  let fileIndex: string[] = [];
+
+  if (!alreadyTrusted) {
+    const choice = await promptTrustCodebase(config.cwd);
+    if (choice === "session") {
+      trustedThisSession = true;
+    } else if (choice === "parent") {
+      trustedThisSession = true;
+      const parent = dirname(resolve(config.cwd));
+      const existing = config.trustedCodebases ?? [];
+      const next = Array.from(new Set([...existing, parent]));
+      await updateStoredConfig({ trustedCodebases: next });
+      config.trustedCodebases = next;
+    }
+  }
+
+  if (trustedThisSession) {
+    const loading = p.spinner();
+    loading.start("Indexing codebase for @ mentions...");
+    try {
+      fileIndex = await indexCodebaseFiles(config.cwd, config.ignorePatterns);
+      loading.stop(
+        fileIndex.length >= 5000
+          ? "Indexed 5000+ files"
+          : `Indexed ${fileIndex.length} files`,
+      );
+    } catch (e: any) {
+      loading.stop("Indexing skipped");
+      ui.warn(`Indexing failed: ${e?.message ?? "unknown error"}`);
+    }
+  }
+
+  let activeResponseAbortController: AbortController | null = null;
+  let ctx!: ReplContext;
+  const input = createInput(
+    () => ({
+      cwd: config.cwd,
+      isHome: config.cwd === shellMeta.userHome,
+      userHome: shellMeta.userHome,
+      provider: ctx.config.provider,
+      model: ctx.config.model,
+      modelLabel: formatModelLabel(ctx.config.provider, ctx.config.model),
+      gitBranch: shellMeta.gitBranch,
+    }),
+    () => fileIndex,
+    () => trustedThisSession,
+    () => activeResponseAbortController !== null,
+    () => {
+      if (!activeResponseAbortController) return false;
+      activeResponseAbortController.abort(new Error("Response interrupted."));
+      return true;
+    },
+  );
+
+  ctx = {
     model,
     config,
     tools,
@@ -873,8 +1443,10 @@ export async function startRepl(
     ctx.messages.push({ role: "user", content: line });
     ui.newline();
 
+    let loading = ui.spinner("Thinking...");
     try {
-      const loading = ui.spinner("Thinking...");
+      const responseAbortController = new AbortController();
+      activeResponseAbortController = responseAbortController;
       let firstToken = true;
 
       ctx.messages = await runAgent(
@@ -887,6 +1459,7 @@ export async function startRepl(
           maxSteps: ctx.config.maxSteps,
           maxTokens: ctx.config.maxTokens,
           providerOptions: buildProviderOptions(ctx.config),
+          abortSignal: responseAbortController.signal,
         },
         {
           onReasoning: (delta) => {
@@ -933,8 +1506,16 @@ export async function startRepl(
       if (firstToken) loading.stop();
       ui.newline();
     } catch (e: any) {
-      ctx.messages.pop();
-      ui.error(e.message);
+      loading.stop();
+      if (activeResponseAbortController?.signal.aborted) {
+        ui.newline();
+        ui.warn("Response interrupted.");
+      } else {
+        ctx.messages.pop();
+        ui.error(e.message);
+      }
+    } finally {
+      activeResponseAbortController = null;
     }
   }
 }
