@@ -11,11 +11,13 @@ import {
   updateStoredConfig,
   type Config,
 } from "./config.js";
-import { getModel } from "./providers.js";
+import { getModel, buildProviderOptions } from "./providers.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { PermissionManager } from "./permissions/index.js";
 import { runAgent, type TokenUsage } from "./agent.js";
 import * as ui from "./ui/renderer.js";
+import { launchMarketplaceHub } from "./marketplace/tui.js";
+import type { ToolPackage, InstalledTool } from "./marketplace/types.js";
 
 // Types
 
@@ -112,7 +114,10 @@ async function selectSessionModel(ctx: ReplContext): Promise<string | null> {
         {
           value: customValue,
           label: "Enter model manually",
-          hint: ctx.config.model === "" ? undefined : `current: ${ctx.config.model}`,
+          hint:
+            ctx.config.model === ""
+              ? undefined
+              : `current: ${ctx.config.model}`,
         },
       ],
     }),
@@ -329,6 +334,92 @@ const commands: Record<string, SlashCommand> = {
       );
     },
   },
+
+  "/marketplace": {
+    description: "Open the community tool marketplace",
+    handler: async (ctx) => {
+      // Mock data for Phase 1
+      const mockPackages: ToolPackage[] = [
+        {
+          id: "auth-checker",
+          name: "Auth Checker",
+          version: "1.0.0",
+          description: "Scan for common authentication vulnerabilities",
+          author: "Crack Code Team",
+          license: "MIT",
+          downloads: 156,
+          rating: 4.5,
+          tags: ["security", "auth"],
+          main: "./dist/index.ts",
+          tools: [
+            {
+              id: "check_auth_flaws",
+              name: "Check Auth Flaws",
+              description: "Detect authentication issues",
+              schema: {},
+            },
+          ],
+          permissions: {
+            requiresFileWrite: false,
+            requiresShellAccess: false,
+          },
+        },
+        {
+          id: "sql-injection-detector",
+          name: "SQL Injection Detector",
+          version: "2.1.3",
+          description: "Identify SQL injection vulnerabilities",
+          author: "Security Labs",
+          license: "MIT",
+          downloads: 342,
+          rating: 4.8,
+          tags: ["security", "sql"],
+          main: "./dist/index.ts",
+          tools: [
+            {
+              id: "detect_sql_injection",
+              name: "Detect SQL Injection",
+              description: "Find SQL injection risks",
+              schema: {},
+            },
+          ],
+          permissions: {
+            requiresFileWrite: false,
+            requiresShellAccess: false,
+          },
+        },
+        {
+          id: "xss-scanner",
+          name: "XSS Scanner",
+          version: "1.5.2",
+          description: "Detect cross-site scripting vulnerabilities",
+          author: "Security Labs",
+          license: "MIT",
+          downloads: 289,
+          rating: 4.6,
+          tags: ["security", "xss", "web"],
+          main: "./dist/index.ts",
+          tools: [
+            {
+              id: "scan_xss",
+              name: "Scan XSS",
+              description: "Find XSS vulnerabilities",
+              schema: {},
+            },
+          ],
+          permissions: {
+            requiresFileWrite: false,
+            requiresShellAccess: false,
+          },
+        },
+      ];
+
+      const mockInstalledTools: InstalledTool[] = [];
+
+      await launchMarketplaceHub(mockPackages, mockInstalledTools);
+      ui.success("Returned to REPL.");
+    },
+  },
 };
 
 async function detectGitBranch(startDir: string): Promise<string | null> {
@@ -400,6 +491,7 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
   const commandHints = [
     "/help",
     "/clear",
+    "/marketplace",
     "/usage",
     "/mode",
     "/model",
@@ -408,6 +500,76 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
     "/compact",
     "/exit",
   ];
+
+  const getCurrentSlashToken = () => {
+    const beforeCursor = line.slice(0, cursor);
+    const tokenStart = beforeCursor.lastIndexOf(" ") + 1;
+    const token = line.slice(tokenStart, cursor);
+
+    if (!token.startsWith("/")) {
+      return null;
+    }
+
+    return { tokenStart, token };
+  };
+
+  const getClosestSlashCommand = (token: string): string | null => {
+    const needle = token.toLowerCase();
+
+    // Prefer prefix matches first.
+    const prefixMatch = commandHints.find((command) =>
+      command.toLowerCase().startsWith(needle),
+    );
+    if (prefixMatch) return prefixMatch;
+
+    // Fallback: closest command by Levenshtein distance.
+    const distance = (a: string, b: string): number => {
+      const rows = a.length + 1;
+      const cols = b.length + 1;
+      const dp: number[][] = Array.from({ length: rows }, () =>
+        Array(cols).fill(0),
+      );
+
+      for (let i = 0; i < rows; i++) dp[i]![0] = i;
+      for (let j = 0; j < cols; j++) dp[0]![j] = j;
+
+      for (let i = 1; i < rows; i++) {
+        for (let j = 1; j < cols; j++) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          dp[i]![j] = Math.min(
+            dp[i - 1]![j]! + 1, // deletion
+            dp[i]![j - 1]! + 1, // insertion
+            dp[i - 1]![j - 1]! + cost, // substitution
+          );
+        }
+      }
+
+      return dp[rows - 1]![cols - 1]!;
+    };
+
+    let best: { command: string; score: number } | null = null;
+    for (const command of commandHints) {
+      const score = distance(needle, command.toLowerCase());
+      if (!best || score < best.score) {
+        best = { command, score };
+      }
+    }
+
+    return best?.command ?? null;
+  };
+
+  const applySlashAutocomplete = (): boolean => {
+    const slashToken = getCurrentSlashToken();
+    if (!slashToken) return false;
+
+    const completion = getClosestSlashCommand(slashToken.token);
+    if (!completion || completion === slashToken.token) return false;
+
+    line =
+      line.slice(0, slashToken.tokenStart) + completion + line.slice(cursor);
+    cursor = slashToken.tokenStart + completion.length;
+    return true;
+  };
 
   const cleanupTerminalState = () => {
     if (!isTTY) return;
@@ -527,6 +689,14 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
         continue;
       }
 
+      // Tab autocomplete for slash commands
+      if (ch === "\t") {
+        if (applySlashAutocomplete()) {
+          renderInput();
+        }
+        continue;
+      }
+
       // ESC sequences (arrows)
       if (ch === "\u001b") {
         const next1 = s[i + 1];
@@ -593,9 +763,9 @@ function createInput(getPromptMeta: () => PromptMeta): InputController {
           return;
         }
 
-      pendingResolve = resolve;
-      line = "";
-      cursor = 0;
+        pendingResolve = resolve;
+        line = "";
+        cursor = 0;
 
         renderInput();
       }),
@@ -716,8 +886,17 @@ export async function startRepl(
           systemPrompt: ctx.config.systemPrompt,
           maxSteps: ctx.config.maxSteps,
           maxTokens: ctx.config.maxTokens,
+          providerOptions: buildProviderOptions(ctx.config),
         },
         {
+          onReasoning: (delta) => {
+            if (firstToken) {
+              loading.stop();
+              firstToken = false;
+              console.log("\x1b[2m🤔 Thinking...\x1b[0m");
+            }
+            ui.streamReasoning(delta);
+          },
           onText: (delta) => {
             if (firstToken) {
               loading.stop();

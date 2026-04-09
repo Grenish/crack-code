@@ -1,4 +1,5 @@
 import { CrackCodeLogo } from "../logo/crack-code.js";
+import { createRequire } from "node:module";
 
 // ─── ANSI Color Palette ─────────────────────────────────────────────
 
@@ -54,6 +55,17 @@ const SEVERITY_STYLE: Record<Severity, { badge: string; color: string }> = {
 };
 
 let activeSpinner: SpinnerHandle | null = null;
+const require = createRequire(import.meta.url);
+
+// Optional syntax highlighting hook. If cli-highlight is unavailable,
+// code blocks still render with plain ANSI styling.
+let cliHighlight:
+  | ((
+      code: string,
+      options?: { language?: string; ignoreIllegals?: boolean },
+    ) => string)
+  | null
+  | undefined = undefined;
 
 // ─── Streaming Markdown State ───────────────────────────────────────
 
@@ -61,6 +73,7 @@ let activeSpinner: SpinnerHandle | null = null;
 let inCodeBlock = false;
 let codeFenceLang = "";
 let codeFenceOpening = false; // true while collecting language after opening ```
+let codeLineBuffer = "";
 
 // Line-level state
 let lineBuffer = "";
@@ -68,6 +81,125 @@ let atLineStart = true; // true when we're at col 0 of a new line
 
 // Inline state — tracks pending marker characters for bold/italic/code
 let pendingBackticks = 0;
+
+function getCliHighlight():
+  | ((
+      code: string,
+      options?: { language?: string; ignoreIllegals?: boolean },
+    ) => string)
+  | null {
+  if (cliHighlight !== undefined) return cliHighlight;
+
+  try {
+    const mod = require("cli-highlight") as {
+      highlight?: (
+        code: string,
+        options?: { language?: string; ignoreIllegals?: boolean },
+      ) => string;
+      default?:
+        | ((
+            code: string,
+            options?: { language?: string; ignoreIllegals?: boolean },
+          ) => string)
+        | {
+            highlight?: (
+              code: string,
+              options?: { language?: string; ignoreIllegals?: boolean },
+            ) => string;
+          };
+    };
+
+    const candidate =
+      mod.highlight ??
+      (typeof mod.default === "function"
+        ? mod.default
+        : mod.default?.highlight);
+
+    cliHighlight = typeof candidate === "function" ? candidate : null;
+  } catch {
+    cliHighlight = null;
+  }
+
+  return cliHighlight;
+}
+
+function normalizeCodeLang(lang: string): string {
+  const raw = lang.trim().toLowerCase();
+  if (!raw) return "";
+
+  const aliases: Record<string, string> = {
+    cjs: "javascript",
+    js: "javascript",
+    mjs: "javascript",
+    sh: "bash",
+    ts: "typescript",
+    yml: "yaml",
+  };
+
+  return aliases[raw] ?? raw;
+}
+
+function isDiffLang(lang: string): boolean {
+  const normalized = normalizeCodeLang(lang);
+  return normalized === "diff" || normalized === "patch";
+}
+
+function formatDiffLine(line: string): string {
+  if (
+    line.startsWith("diff ") ||
+    line.startsWith("index ") ||
+    line.startsWith("new file mode") ||
+    line.startsWith("deleted file mode")
+  ) {
+    return `${C.dim}${line}${C.reset}`;
+  }
+
+  if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+    return `${C.bold}${C.magenta}${line}${C.reset}`;
+  }
+
+  if (line.startsWith("@@")) {
+    return `${C.bold}${C.cyan}${line}${C.reset}`;
+  }
+
+  if (line.startsWith("+")) {
+    return `${C.green}${line}${C.reset}`;
+  }
+
+  if (line.startsWith("-")) {
+    return `${C.red}${line}${C.reset}`;
+  }
+
+  return `${C.white}${line}${C.reset}`;
+}
+
+function formatCodeLine(line: string, lang: string): string {
+  if (line.length === 0) return "";
+
+  const normalizedLang = normalizeCodeLang(lang);
+  if (isDiffLang(normalizedLang)) {
+    return formatDiffLine(line);
+  }
+
+  const highlight = getCliHighlight();
+  if (highlight && normalizedLang) {
+    try {
+      return highlight(line, {
+        ignoreIllegals: true,
+        language: normalizedLang,
+      });
+    } catch {
+      // fall back below
+    }
+  }
+
+  return `${C.white}${line}${C.reset}`;
+}
+
+function emitCodeLine(rawLine: string): void {
+  const rendered = formatCodeLine(rawLine, codeFenceLang);
+  process.stdout.write(`${rendered}\n`);
+}
 
 // ─── Streaming Markdown Renderer ────────────────────────────────────
 //
@@ -80,6 +212,11 @@ let pendingBackticks = 0;
 // This gives us the best fidelity we can get while keeping the streaming
 // feel — block decorations appear as soon as the newline arrives, and
 // inline formatting is applied per-line.
+
+export function streamReasoning(chunk: string): void {
+  if (activeSpinner) activeSpinner.stop();
+  process.stdout.write(`${C.dim}${C.italic}${chunk}${C.reset}`);
+}
 
 export function streamText(chunk: string): void {
   if (activeSpinner) activeSpinner.stop();
@@ -99,6 +236,7 @@ export function streamText(chunk: string): void {
           // Opening fence — start collecting the language tag
           inCodeBlock = true;
           codeFenceLang = "";
+          codeLineBuffer = "";
           codeFenceOpening = true;
           // Flush any buffered line content before the fence
           if (lineBuffer.length > 0) {
@@ -107,11 +245,13 @@ export function streamText(chunk: string): void {
           }
         } else {
           // Closing fence
+          if (codeLineBuffer.length > 0) {
+            emitCodeLine(codeLineBuffer);
+            codeLineBuffer = "";
+          }
           inCodeBlock = false;
           codeFenceOpening = false;
-          process.stdout.write(
-            `${C.reset}\n${C.gray}  ╰${"─".repeat(48)}${C.reset}\n`,
-          );
+          process.stdout.write("\n");
           atLineStart = true;
           lineBuffer = "";
         }
@@ -138,11 +278,7 @@ export function streamText(chunk: string): void {
         // Still on the opening line — collect language tag until newline
         if (char === "\n") {
           codeFenceOpening = false;
-          const lang = codeFenceLang.trim();
-          const label = lang || "code";
-          process.stdout.write(
-            `\n${C.gray}  ╭─ ${C.cyan}${C.bold}${label}${C.reset}${C.gray} ${"─".repeat(Math.max(0, 44 - label.length))}${C.reset}\n`,
-          );
+          process.stdout.write("\n");
           atLineStart = true;
         } else {
           codeFenceLang += char;
@@ -152,14 +288,12 @@ export function streamText(chunk: string): void {
 
       // Normal code content
       if (char === "\n") {
-        process.stdout.write("\n");
+        emitCodeLine(codeLineBuffer);
+        codeLineBuffer = "";
         atLineStart = true;
       } else {
-        if (atLineStart) {
-          process.stdout.write(`${C.gray}  │${C.reset} ${C.cyan}`);
-          atLineStart = false;
-        }
-        process.stdout.write(char);
+        codeLineBuffer += char;
+        atLineStart = false;
       }
       continue;
     }
@@ -339,6 +473,7 @@ export function resetStreamState(): void {
   inCodeBlock = false;
   codeFenceLang = "";
   codeFenceOpening = false;
+  codeLineBuffer = "";
   lineBuffer = "";
   atLineStart = true;
   pendingBackticks = 0;
@@ -356,16 +491,19 @@ export function flushStream(): void {
   }
 
   // Flush remaining line buffer
-  if (lineBuffer.length > 0) {
+  if (lineBuffer.length > 0 && !inCodeBlock) {
     emitFormattedLine(lineBuffer);
     lineBuffer = "";
   }
 
+  if (inCodeBlock && codeLineBuffer.length > 0) {
+    emitCodeLine(codeLineBuffer);
+    codeLineBuffer = "";
+  }
+
   // If we're stuck inside a code block (malformed markdown), close it
   if (inCodeBlock) {
-    process.stdout.write(
-      `${C.reset}\n${C.gray}  ╰${"─".repeat(48)}${C.reset}\n`,
-    );
+    process.stdout.write("\n");
     inCodeBlock = false;
   }
 
@@ -619,7 +757,11 @@ function composePromptFrameTop(
   const fill = "─".repeat(
     Math.max(
       1,
-      width - visibleLength(prefix) - visibleLength(suffix) - leftPlain.length - rightPlain.length,
+      width -
+        visibleLength(prefix) -
+        visibleLength(suffix) -
+        leftPlain.length -
+        rightPlain.length,
     ),
   );
 
@@ -634,16 +776,17 @@ function composePromptFrameBottom(footer: string, width: number): string {
   const fill = "─".repeat(
     Math.max(
       1,
-      width - visibleLength(prefix) - visibleLength(suffix) - captionPlain.length,
+      width -
+        visibleLength(prefix) -
+        visibleLength(suffix) -
+        captionPlain.length,
     ),
   );
 
   return `${prefix}${caption}${C.gray}${fill}${suffix}`;
 }
 
-export function renderPromptFrame(
-  state: PromptFrameState,
-): PromptFrameRender {
+export function renderPromptFrame(state: PromptFrameState): PromptFrameRender {
   const width = panelWidth();
   const inner = Math.max(20, width - 4);
   const prompt = `${C.bold}${C.cyan}❯${C.reset} `;

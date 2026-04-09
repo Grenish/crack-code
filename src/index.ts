@@ -4,9 +4,10 @@ import {
   isSetupCancelledError,
   loadConfig,
   runSetup,
+  type Config,
   type ConfigOverrides,
 } from "./config.js";
-import { getModel } from "./providers.js";
+import { getModel, buildProviderOptions } from "./providers.js";
 import { ToolRegistry } from "./tools/registry.js";
 import {
   PermissionManager,
@@ -17,6 +18,7 @@ import { writeFileTool } from "./tools/file-write.js";
 import { runCommandTool } from "./tools/shell.js";
 import { listFilesTool } from "./tools/glob.js";
 import { virtualTerminalTool } from "./tools/virtual-terminal.js";
+import { createWebSearchTool } from "./tools/web-search.js";
 import { runAgent } from "./agent.js";
 import { startRepl } from "./repl.js";
 import * as ui from "./ui/renderer.js";
@@ -67,6 +69,7 @@ AI-powered vulnerability scanning CLI for security-focused code review.
   /exit       Exit                 /mode       Toggle edit mode
   /usage      Token usage          /model      Show model info
   /policy     Show/set policy      /compact    Reduce context size
+  /marketplace   Community tools
 `);
 }
 
@@ -127,7 +130,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 // Tool Registration
 
-function registerTools(allowEdits: boolean): ToolRegistry {
+function registerTools(config: Config): ToolRegistry {
   const tools = new ToolRegistry();
 
   // Always available — read-only tools
@@ -140,8 +143,19 @@ function registerTools(allowEdits: boolean): ToolRegistry {
   // Virtual terminal — persistent context across commands
   tools.register(virtualTerminalTool);
 
+  // Optional web search tool (enabled when provider credentials are configured)
+  if (config.searchProvider && config.searchApiKey) {
+    if (config.searchProvider !== "google" || config.searchGoogleCx) {
+      tools.register(createWebSearchTool(config));
+    } else {
+      ui.warn(
+        "Web search is disabled: Google search provider requires a Programmable Search Engine ID (cx). Run `crack-code --setup`.",
+      );
+    }
+  }
+
   // Write tools only when edits are enabled
-  if (allowEdits) {
+  if (config.allowEdits) {
     tools.register(writeFileTool);
   }
 
@@ -223,7 +237,7 @@ async function main(): Promise<void> {
 
   // Register tools
 
-  const tools = registerTools(config.allowEdits);
+  const tools = registerTools(config);
 
   // Create permission manager
 
@@ -271,8 +285,17 @@ async function runOneShot(
         systemPrompt: config.systemPrompt,
         maxSteps: config.maxSteps,
         maxTokens: config.maxTokens,
+        providerOptions: buildProviderOptions(config),
       },
       {
+        onReasoning: (delta) => {
+          if (firstToken) {
+            loading.stop();
+            firstToken = false;
+            console.log("\x1b[2m🤔 Thinking...\x1b[0m");
+          }
+          ui.streamReasoning(delta);
+        },
         onText: (delta) => {
           if (firstToken) {
             loading.stop();

@@ -53,6 +53,7 @@ export interface Config {
   // generation
   maxTokens: number;
   maxSteps: number;
+  thinkingBudget?: number; // reasoning budget for models like Anthropic, OpenAI o3, Google Gemini
 
   /*
    * permission behavior
@@ -69,7 +70,14 @@ export interface Config {
 
   // context
   cwd: string;
+
+  // web search tool
+  searchProvider?: WebSearchProvider;
+  searchApiKey?: string;
+  searchGoogleCx?: string;
 }
+
+export type WebSearchProvider = "google" | "brave" | "tavily";
 
 interface StoredConfig {
   userName?: string;
@@ -84,6 +92,12 @@ interface StoredConfig {
   location?: string;
   vertexClientEmail?: string;
   vertexPrivateKey?: string;
+  // Web search-specific
+  searchProvider?: WebSearchProvider;
+  searchApiKey?: string;
+  searchGoogleCx?: string;
+  // reasoning budget
+  thinkingBudget?: number;
 }
 
 interface ProviderSetupResult {
@@ -145,6 +159,14 @@ const API_KEY_ENV: Record<Config["provider"], string> = {
   openrouter: "OPENROUTER_API_KEY",
   vertex: "", // Vertex uses service account JSON — no single env key
 };
+
+const SEARCH_PROVIDERS = ["google", "brave", "tavily"] as const;
+const SEARCH_API_KEY_ENV: Record<WebSearchProvider, string> = {
+  google: "GOOGLE_SEARCH_API_KEY",
+  brave: "BRAVE_SEARCH_API_KEY",
+  tavily: "TAVILY_API_KEY",
+};
+const GOOGLE_SEARCH_CX_ENV = "GOOGLE_SEARCH_ENGINE_ID";
 
 const DEFAULT_SCAN_PATTERNS = [
   "**/*.ts",
@@ -208,9 +230,7 @@ async function promptText(
     await p.text({
       message,
       ...rest,
-      validate: validate
-        ? (value) => validate(value ?? "")
-        : undefined,
+      validate: validate ? (value) => validate(value ?? "") : undefined,
     }),
   );
 
@@ -224,9 +244,7 @@ async function promptSecret(
   const value = unwrapPrompt(
     await p.text({
       message,
-      validate: validate
-        ? (value) => validate(value ?? "")
-        : undefined,
+      validate: validate ? (value) => validate(value ?? "") : undefined,
     }),
   );
 
@@ -637,6 +655,24 @@ function providerLabel(provider: Config["provider"]): string {
   }
 }
 
+function searchProviderLabel(provider: WebSearchProvider): string {
+  switch (provider) {
+    case "google":
+      return "Google Custom Search";
+    case "brave":
+      return "Brave Search";
+    case "tavily":
+      return "Tavily Search";
+  }
+}
+
+function isSearchProvider(value: unknown): value is WebSearchProvider {
+  return (
+    typeof value === "string" &&
+    SEARCH_PROVIDERS.includes(value as WebSearchProvider)
+  );
+}
+
 function maskSecret(value: string): string {
   if (!value) return "not set";
   if (value.length <= 12) return `${value.slice(0, 3)}••••${value.slice(-2)}`;
@@ -855,14 +891,18 @@ async function configureProviderSettings(
       if (useEnv) {
         apiKey = envKey;
       } else {
-        apiKey = await promptSecret(`${providerLabel(provider)} API key`, (
-          value,
-        ) => (value.trim().length === 0 ? "API key is required." : undefined));
+        apiKey = await promptSecret(
+          `${providerLabel(provider)} API key`,
+          (value) =>
+            value.trim().length === 0 ? "API key is required." : undefined,
+        );
       }
     } else {
-      apiKey = await promptSecret(`${providerLabel(provider)} API key`, (
-        value,
-      ) => (value.trim().length === 0 ? "API key is required." : undefined));
+      apiKey = await promptSecret(
+        `${providerLabel(provider)} API key`,
+        (value) =>
+          value.trim().length === 0 ? "API key is required." : undefined,
+      );
     }
 
     if (!apiKey) {
@@ -891,13 +931,17 @@ async function configureProviderSettings(
   let model: string;
 
   if (models.length > 0) {
-    model = await selectModel(models, existing?.provider === provider ? existing.model : undefined);
+    model = await selectModel(
+      models,
+      existing?.provider === provider ? existing.model : undefined,
+    );
   } else {
     p.log.warn(
       "Could not fetch models automatically. Enter a model name manually.",
     );
     model = await promptText("Model", {
-      initialValue: existing?.provider === provider ? existing.model : undefined,
+      initialValue:
+        existing?.provider === provider ? existing.model : undefined,
       validate: (value) =>
         value.trim().length === 0 ? "Model is required." : undefined,
     });
@@ -915,6 +959,116 @@ async function configureProviderSettings(
   };
 }
 
+interface WebSearchSetupResult {
+  searchApiKey?: string;
+  searchGoogleCx?: string;
+  searchProvider?: WebSearchProvider;
+}
+
+async function configureWebSearch(
+  existing?: StoredConfig | null,
+): Promise<WebSearchSetupResult> {
+  const provider = unwrapPrompt(
+    await p.select({
+      message: existing?.searchProvider
+        ? `Choose a web search provider (current: ${searchProviderLabel(existing.searchProvider)})`
+        : "Choose a web search provider",
+      options: SEARCH_PROVIDERS.map((value) => ({
+        value,
+        label: searchProviderLabel(value),
+        hint:
+          value === "google"
+            ? "Programmable Search Engine (requires API key + cx)"
+            : value === "brave"
+              ? "Brave independent web index"
+              : "Fast AI-oriented search API",
+      })),
+      initialValue: existing?.searchProvider,
+    }),
+  );
+
+  p.log.step(`Web search credentials (${searchProviderLabel(provider)})`);
+
+  if (provider === "google") {
+    p.log.info(
+      [
+        "Google Custom Search requires:",
+        `- API key (${SEARCH_API_KEY_ENV.google})`,
+        `- Programmable Search Engine ID (cx) (${GOOGLE_SEARCH_CX_ENV})`,
+      ].join("\n"),
+    );
+  }
+
+  const envKey = process.env[SEARCH_API_KEY_ENV[provider]];
+  let searchApiKey = "";
+
+  if (envKey) {
+    p.log.info(
+      `Detected ${SEARCH_API_KEY_ENV[provider]} (${maskSecret(envKey)}).`,
+    );
+    const useEnv = await promptConfirm("Use the detected search API key?");
+    searchApiKey = useEnv
+      ? envKey
+      : await promptSecret(
+          `${searchProviderLabel(provider)} API key`,
+          (value) =>
+            value.trim().length === 0 ? "API key is required." : undefined,
+        );
+  } else {
+    searchApiKey = await promptSecret(
+      `${searchProviderLabel(provider)} API key`,
+      (value) =>
+        value.trim().length === 0 ? "API key is required." : undefined,
+    );
+  }
+
+  if (!searchApiKey) {
+    throw new Error("Search API key is required.");
+  }
+
+  let searchGoogleCx: string | undefined;
+  if (provider === "google") {
+    const envCx = process.env[GOOGLE_SEARCH_CX_ENV];
+    if (envCx) {
+      p.log.info(`Detected ${GOOGLE_SEARCH_CX_ENV} (${envCx}).`);
+      const useEnvCx = await promptConfirm(
+        "Use the detected Programmable Search Engine ID (cx)?",
+      );
+      searchGoogleCx = useEnvCx
+        ? envCx
+        : await promptText("Programmable Search Engine ID (cx)", {
+            initialValue:
+              existing?.searchProvider === "google"
+                ? existing.searchGoogleCx
+                : undefined,
+            validate: (value) =>
+              value.trim().length === 0
+                ? "cx is required for Google search."
+                : undefined,
+          });
+    } else {
+      searchGoogleCx = await promptText("Programmable Search Engine ID (cx)", {
+        initialValue:
+          existing?.searchProvider === "google"
+            ? existing.searchGoogleCx
+            : undefined,
+        validate: (value) =>
+          value.trim().length === 0
+            ? "cx is required for Google search."
+            : undefined,
+      });
+    }
+  }
+
+  p.log.success(`${searchProviderLabel(provider)} configured.`);
+
+  return {
+    searchProvider: provider,
+    searchApiKey,
+    ...(searchGoogleCx ? { searchGoogleCx } : {}),
+  };
+}
+
 function printSetupSummary(stored: StoredConfig): void {
   const lines = [
     ...(stored.userName ? [`User: ${stored.userName}`] : []),
@@ -928,6 +1082,15 @@ function printSetupSummary(stored: StoredConfig): void {
     ...(stored.resourceName ? [`Resource: ${stored.resourceName}`] : []),
     ...(stored.project ? [`Project: ${stored.project}`] : []),
     ...(stored.location ? [`Location: ${stored.location}`] : []),
+    ...(stored.searchProvider
+      ? [
+          `Web search: ${searchProviderLabel(stored.searchProvider)} (${stored.searchProvider})`,
+          `Search API key: ${maskSecret(stored.searchApiKey ?? "")}`,
+          ...(stored.searchProvider === "google"
+            ? [`Search engine ID (cx): ${stored.searchGoogleCx ?? "not set"}`]
+            : []),
+        ]
+      : ["Web search: not configured"]),
     `Config: ${CONFIG_PATH}`,
   ];
 
@@ -968,10 +1131,13 @@ async function firstRunSetup(): Promise<StoredConfig> {
   const provider = await selectProvider(existing?.provider);
   p.log.success(`Selected ${providerLabel(provider)}.`);
   const providerSetup = await configureProviderSettings(provider, existing);
+  p.log.step("Web search");
+  const webSearchSetup = await configureWebSearch(existing);
 
   const stored: StoredConfig = {
     userName,
     ...providerSetup,
+    ...webSearchSetup,
   };
 
   await writeStoredConfig(stored);
@@ -988,52 +1154,118 @@ function buildSystemPrompt(
   userName?: string,
 ): string {
   const lines = [
-    "You are Crack Code — a security-focused code analysis assistant running in the user's terminal.",
+    "You are Crack Code — an elite security-focused code analysis assistant running in the user's terminal.",
+    "You think like a red-team attacker, reason like a threat modeler, and report like a staff-level security engineer.",
     ...(userName
       ? [
           "",
           `User: ${userName}`,
-          "Address the user by name when it is natural and helpful.",
+          "Address the user by name when it feels natural — not on every message.",
         ]
       : []),
     "",
     `Working directory: ${cwd}`,
     "",
-    "## Your Role",
-    "Analyze codebases to find security vulnerabilities, bugs, logic flaws, and potential exploits.",
-    "You think like an attacker but report like a senior security engineer.",
+
+    "## Mission",
+    "Perform deep, evidence-based security audits of codebases.",
+    "Uncover vulnerabilities, logic flaws, misconfigurations, and exploitable patterns.",
+    "Never guess. Never hallucinate. Every claim must be grounded in code you have actually read.",
     "",
-    "## What You Look For",
-    "- Injection vulnerabilities (SQL, XSS, command injection, path traversal)",
-    "- Authentication & authorization flaws",
-    "- Hardcoded secrets, API keys, credentials",
-    "- Insecure cryptography or hashing",
-    "- Race conditions and TOCTOU bugs",
-    "- Unsafe deserialization",
-    "- Missing input validation and sanitization",
-    "- Insecure dependencies or configurations",
-    "- Business logic flaws",
-    "- Information leakage (error messages, stack traces, debug endpoints)",
-    "- SSRF, CSRF, open redirects",
-    "- Improper error handling",
-    "- Memory safety issues (buffer overflows, use-after-free) where applicable",
+
+    "## Threat Coverage",
     "",
-    "## How You Report",
-    "For each finding:",
-    "1. **Severity** — CRITICAL / HIGH / MEDIUM / LOW / INFO",
-    "2. **File & Line** — exact location",
-    "3. **Vulnerable Code** — show the actual problematic code",
-    "4. **Explanation** — what the vulnerability is and why it matters",
-    "5. **Attack Scenario** — how an attacker could exploit this",
-    "6. **Fix** — concrete code showing the remediation",
+    "### Injection & Input Handling",
+    "- SQL / NoSQL / LDAP / XPath injection",
+    "- OS command injection and argument injection",
+    "- XSS (reflected, stored, DOM-based)",
+    "- Path traversal and directory traversal",
+    "- Template injection (SSTI)",
+    "- HTTP header injection and response splitting",
     "",
-    "## Rules",
-    "- Always read the actual source files before making claims. Never guess.",
-    "- Start by understanding the project structure (list files, read configs).",
-    "- Prioritize findings by severity. CRITICAL and HIGH first.",
-    "- Be precise. Cite exact file paths and line numbers.",
-    "- No false positives. If you're unsure, say so.",
-    "- When showing fixes, show complete corrected code, not just diffs.",
+    "### Authentication & Authorization",
+    "- Broken authentication flows (weak passwords, missing lockout, enumeration)",
+    "- Insecure session management (non-expiring tokens, no rotation, fixation)",
+    "- Missing or bypassable authorization checks (IDOR, privilege escalation)",
+    "- JWT vulnerabilities (alg:none, weak secrets, missing validation)",
+    "- OAuth/OIDC misconfigurations",
+    "",
+    "### Cryptography & Secrets",
+    "- Hardcoded secrets, API keys, tokens, passwords in source or config",
+    "- Weak or broken algorithms (MD5, SHA1 for passwords, ECB mode, DES)",
+    "- Insufficient entropy or predictable random number generation",
+    "- Missing encryption at rest or in transit",
+    "- Improper certificate validation (TLS pinning bypass, hostname ignored)",
+    "",
+    "### Application Logic",
+    "- Business logic flaws (price manipulation, workflow bypass, state abuse)",
+    "- Race conditions and TOCTOU (time-of-check/time-of-use) bugs",
+    "- Mass assignment and parameter pollution",
+    "- Unsafe deserialization and object injection",
+    "- Insecure direct object references",
+    "",
+    "### Infrastructure & Configuration",
+    "- Insecure defaults (debug mode on, verbose errors, open CORS, permissive CSP)",
+    "- Dangerous dependency versions (known CVEs)",
+    "- Overly permissive file or IAM permissions",
+    "- Exposed admin endpoints, dev routes, or debug APIs",
+    "- Misconfigured cloud storage (public S3 buckets, unauthenticated blobs)",
+    "",
+    "### Memory & Runtime Safety (where applicable)",
+    "- Buffer overflows, heap/stack corruption",
+    "- Use-after-free, double-free",
+    "- Integer overflow / underflow",
+    "- Null pointer dereferences in security-sensitive paths",
+    "",
+    "### Web-Specific Attacks",
+    "- SSRF (internal network access, cloud metadata exposure)",
+    "- CSRF (missing or bypassable tokens)",
+    "- Open redirects and unvalidated redirects",
+    "- Clickjacking (missing frame protection headers)",
+    "- Subdomain takeover indicators",
+    "",
+    "### Information Leakage",
+    "- Verbose error messages exposing stack traces, internal paths, or SQL",
+    "- Sensitive data in logs, comments, or version control",
+    "- Leaky APIs (over-fetching fields, hidden fields exposed)",
+    "- Timing side-channels in authentication or comparison logic",
+    "",
+
+    "## Audit Methodology",
+    "1. **Reconnaissance** — map the project structure, entry points, frameworks, and dependencies before touching any findings.",
+    "2. **Triage** — identify the highest-risk surfaces first (auth, payments, file upload, external input).",
+    "3. **Deep Read** — read the actual source. Line numbers must match real code.",
+    "4. **Cross-Reference** — trace data flows from input to sink; don't stop at one layer.",
+    "5. **Validate** — if uncertain about a finding, say so explicitly. Mark it UNCONFIRMED rather than inflating confidence.",
+    "",
+
+    "## Report Format",
+    "Output findings in descending severity order. For each finding:",
+    "",
+    "**[SEVERITY] Short Title**",
+    "- **File & Lines:** exact path and line range",
+    "- **Vulnerable Code:** the actual problematic snippet (no paraphrasing)",
+    "- **Root Cause:** why this is dangerous and what property it violates",
+    "- **Attack Scenario:** realistic exploitation steps an adversary would follow",
+    "- **Impact:** confidentiality / integrity / availability consequences",
+    "- **Fix:** complete corrected code (not pseudocode, not a diff — working code)",
+    "- **AI Fix Prompt:** a self-contained, copy-pasteable prompt an AI coding agent can use to apply the fix autonomously",
+    "",
+
+    "## Severity Rubric",
+    "- **CRITICAL** — remote code execution, authentication bypass, data exfiltration with no user interaction",
+    "- **HIGH** — significant data exposure, privilege escalation, exploitable with low effort",
+    "- **MEDIUM** — requires some conditions or user interaction; meaningful risk if chained",
+    "- **LOW** — defense-in-depth gaps, minor info leakage, best-practice violations",
+    "- **INFO** — style, dead code, non-exploitable observations worth noting",
+    "",
+
+    "## Hard Rules",
+    "- Read before you claim. Never fabricate file contents or line numbers.",
+    "- No false positives. Uncertain findings must be flagged as UNCONFIRMED.",
+    "- Complete fixes only. Show the full corrected function or block, not a fragment.",
+    "- No remediation theater. Don't suggest cosmetic changes that don't address the root cause.",
+    "- Stay in scope. Only report on the codebase provided unless a dependency CVE is directly exploitable.",
   ];
 
   if (!allowEdits) {
@@ -1084,6 +1316,16 @@ export async function loadConfig(
   const model = overrides.model ?? stored.model;
   const allowEdits = overrides.allowEdits ?? stored.allowEdits ?? false;
   const cwd = process.cwd();
+  const searchProvider = isSearchProvider(stored.searchProvider)
+    ? stored.searchProvider
+    : undefined;
+  const searchApiKey =
+    searchProvider &&
+    (stored.searchApiKey ?? process.env[SEARCH_API_KEY_ENV[searchProvider]]);
+  const searchGoogleCx =
+    searchProvider === "google"
+      ? (stored.searchGoogleCx ?? process.env[GOOGLE_SEARCH_CX_ENV])
+      : undefined;
 
   return {
     userName: stored.userName,
@@ -1104,6 +1346,9 @@ export async function loadConfig(
     scanPatterns: overrides.scanPatterns ?? DEFAULT_SCAN_PATTERNS,
     ignorePatterns: overrides.ignorePatterns ?? DEFAULT_IGNORE_PATTERNS,
     cwd,
+    searchProvider,
+    searchApiKey,
+    searchGoogleCx,
   };
 }
 
