@@ -4,12 +4,14 @@ export type PermissionPolicy = "ask" | "skip" | "allow-all" | "deny-all";
 
 export class PermissionManager {
   private policy: PermissionPolicy;
+  private allowEdits: boolean;
   private sessionApprovals = new Set<string>();
 
   private readonly readOnlyTools = new Set(["read_file", "list_files"]);
 
-  constructor(policy: PermissionPolicy = "ask") {
+  constructor(policy: PermissionPolicy = "ask", allowEdits = false) {
     this.policy = policy;
+    this.allowEdits = allowEdits;
   }
 
   getPolicy(): PermissionPolicy {
@@ -20,12 +22,25 @@ export class PermissionManager {
     this.policy = policy;
   }
 
+  getEditMode(): boolean {
+    return this.allowEdits;
+  }
+
+  setEditMode(allowEdits: boolean): void {
+    this.allowEdits = allowEdits;
+  }
+
   async check(
     toolName: string,
     input: Record<string, unknown>,
   ): Promise<boolean> {
     if (this.readOnlyTools.has(toolName)) {
       return true;
+    }
+
+    if (!this.allowEdits) {
+      ui.toolBlocked(toolName, "Blocked by read-only mode.");
+      return false;
     }
 
     switch (this.policy) {
