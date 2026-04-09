@@ -1161,6 +1161,7 @@ async function firstRunSetup(): Promise<StoredConfig> {
 
 function buildSystemPrompt(
   cwd: string,
+  permissionPolicy: Config["permissionPolicy"],
   allowEdits: boolean,
   userName?: string,
   dateTime?: string,
@@ -1190,6 +1191,27 @@ function buildSystemPrompt(
     "Perform deep, evidence-based security audits of codebases.",
     "Uncover vulnerabilities, logic flaws, misconfigurations, and exploitable patterns.",
     "Never guess. Never hallucinate. Every claim must be grounded in code you have actually read.",
+    "",
+
+    "## Permission Model",
+    `Edit mode (/permission): ${allowEdits ? "edit" : "read-only"}`,
+    `Approval policy (/policy): ${permissionPolicy}`,
+    "These are separate controls.",
+    "Read-only tools such as file reading and file listing are always allowed.",
+    "Shell commands and file writes are governed by the approval policy, and file writes are only available when edit mode is enabled.",
+    "",
+    "### /permission",
+    "- This toggles read-only vs edit mode.",
+    "- Read-only mode means you must not write files.",
+    "- Edit mode means write tools may be available, but you still must obey the approval policy before using them.",
+    "- If a fix requires changes and edit mode is off, tell the user to switch with `/permission` or restart with `--allow-edits`.",
+    "",
+    "### /policy",
+    "- This controls whether you must ask before using non-read-only tools.",
+    "- `ask`: ask the user before each non-read-only action unless it has already been approved in this session.",
+    "- `skip`: proceed without interactive approval, but still stay minimal and stop for risky or ambiguous actions.",
+    "- `allow-all`: proceed freely with non-read-only tools, but stay scoped to the task.",
+    "- `deny-all`: do not use mutating tools at all; provide text-only fix suggestions.",
     "",
 
     "## Threat Coverage",
@@ -1334,6 +1356,7 @@ export async function loadConfig(
 
   const model = overrides.model ?? stored.model;
   const allowEdits = overrides.allowEdits ?? stored.allowEdits ?? false;
+  const permissionPolicy = overrides.permissionPolicy ?? "ask";
   const cwd = process.cwd();
   const useDefaultLogo = stored.useDefaultLogo ?? (stored.logo ? false : true);
   const logo = overrides.logo ?? (useDefaultLogo ? undefined : stored.logo);
@@ -1362,10 +1385,11 @@ export async function loadConfig(
     vertexPrivateKey: stored.vertexPrivateKey,
     maxTokens: overrides.maxTokens ?? 16384,
     maxSteps: overrides.maxSteps ?? 30,
-    permissionPolicy: overrides.permissionPolicy ?? "ask",
+    permissionPolicy,
     allowEdits,
     systemPrompt: buildSystemPrompt(
       cwd,
+      permissionPolicy,
       allowEdits,
       stored.userName,
       new Date().toISOString(),
