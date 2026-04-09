@@ -24,6 +24,10 @@ export class ToolRegistry {
     for (const def of defs) this.defs.push(def);
   }
 
+  remove(name: string): void {
+    this.defs = this.defs.filter((def) => def.name !== name);
+  }
+
   // Convert to AI SDK ToolSet with permission gating and UI hooks
   toAISDKTools(permissions: PermissionManager): ToolSet {
     const tools: ToolSet = {};
