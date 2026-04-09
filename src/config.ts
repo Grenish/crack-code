@@ -71,6 +71,13 @@ export interface Config {
   // context
   cwd: string;
 
+  // trusted codebases for indexing / convenience features
+  trustedCodebases?: string[];
+
+  // custom logo support
+  logo?: string;
+  useDefaultLogo?: boolean;
+
   // web search tool
   searchProvider?: WebSearchProvider;
   searchApiKey?: string;
@@ -85,6 +92,9 @@ interface StoredConfig {
   model: string;
   apiKey: string;
   allowEdits?: boolean;
+  trustedCodebases?: string[];
+  logo?: string;
+  useDefaultLogo?: boolean;
   // Azure-specific
   resourceName?: string;
   // Vertex-specific
@@ -121,6 +131,7 @@ export interface ConfigOverrides {
   allowEdits?: boolean;
   scanPatterns?: string[];
   ignorePatterns?: string[];
+  logo?: string;
 }
 
 export class SetupCancelledError extends Error {
@@ -1152,6 +1163,7 @@ function buildSystemPrompt(
   cwd: string,
   allowEdits: boolean,
   userName?: string,
+  dateTime?: string,
 ): string {
   const lines = [
     "You are Crack Code — an elite security-focused code analysis assistant running in the user's terminal.",
@@ -1161,6 +1173,13 @@ function buildSystemPrompt(
           "",
           `User: ${userName}`,
           "Address the user by name when it feels natural — not on every message.",
+        ]
+      : []),
+    ...(dateTime
+      ? [
+          "",
+          `Current date and time: ${dateTime}`,
+          "Use this timestamp to interpret time-sensitive questions accurately.",
         ]
       : []),
     "",
@@ -1316,6 +1335,8 @@ export async function loadConfig(
   const model = overrides.model ?? stored.model;
   const allowEdits = overrides.allowEdits ?? stored.allowEdits ?? false;
   const cwd = process.cwd();
+  const useDefaultLogo = stored.useDefaultLogo ?? (stored.logo ? false : true);
+  const logo = overrides.logo ?? (useDefaultLogo ? undefined : stored.logo);
   const searchProvider = isSearchProvider(stored.searchProvider)
     ? stored.searchProvider
     : undefined;
@@ -1332,6 +1353,7 @@ export async function loadConfig(
     provider,
     model,
     apiKey: apiKey ?? "",
+    trustedCodebases: stored.trustedCodebases,
     resourceName: stored.resourceName ?? process.env.AZURE_RESOURCE_NAME,
     project: stored.project ?? process.env.GOOGLE_CLOUD_PROJECT,
     location:
@@ -1342,13 +1364,19 @@ export async function loadConfig(
     maxSteps: overrides.maxSteps ?? 30,
     permissionPolicy: overrides.permissionPolicy ?? "ask",
     allowEdits,
-    systemPrompt: buildSystemPrompt(cwd, allowEdits, stored.userName),
+    systemPrompt: buildSystemPrompt(
+      cwd,
+      allowEdits,
+      stored.userName,
+      new Date().toISOString(),
+    ),
     scanPatterns: overrides.scanPatterns ?? DEFAULT_SCAN_PATTERNS,
     ignorePatterns: overrides.ignorePatterns ?? DEFAULT_IGNORE_PATTERNS,
     cwd,
     searchProvider,
     searchApiKey,
     searchGoogleCx,
+    logo,
   };
 }
 
@@ -1393,6 +1421,11 @@ export async function updateStoredConfig(
 ): Promise<void> {
   const existing = (await readStoredConfig()) ?? ({} as StoredConfig);
   const merged = { ...existing, ...updates };
+  if ("logo" in updates && updates.logo === undefined) {
+    merged.useDefaultLogo = true;
+  } else if ("logo" in updates) {
+    merged.useDefaultLogo = false;
+  }
   await writeStoredConfig(merged);
   p.log.success("Config updated");
 }
