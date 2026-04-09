@@ -80,7 +80,7 @@ crack-code --yolo "scan and fix everything"
 | `/exit`    | Exit the REPL                                        |
 | `/clear`   | Clear conversation history                           |
 | `/usage`   | Show token usage for this session                    |
-| `/mode`    | Toggle read-only ↔ edit mode                         |
+| `/permission` | Choose read-only or edit mode                  |
 | `/model`   | Show or change the active model                      |
 | `/provider`| Configure a provider and update credentials          |
 | `/policy`  | Show or set permission policy                        |
@@ -228,7 +228,7 @@ crack-code -i
 # Then ask questions like:
 # > scan for hardcoded secrets
 # > check the auth module for vulnerabilities
-# /mode       (toggle edit mode)
+# /permission   (choose edit mode)
 # /model      (change model)
 # /provider   (change provider)
 ```
