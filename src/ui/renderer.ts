@@ -1,5 +1,6 @@
 import { CrackCodeLogo } from "../logo/crack-code.js";
 import { createRequire } from "node:module";
+import { APP_VERSION } from "../version.js";
 
 // ─── ANSI Color Palette ─────────────────────────────────────────────
 
@@ -29,7 +30,6 @@ const C = {
   bgGray: "\x1b[100m",
 } as const;
 
-const APP_VERSION = "0.2.0";
 const MAX_SURFACE_WIDTH = 118;
 
 type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
@@ -904,7 +904,7 @@ export function banner(state: BannerState): void {
   console.log(greeting);
 
   // Help text
-  const helpText = `${C.dim}/help for commands • /model and /provider to change${C.reset}`;
+  const helpText = `${C.dim}/help for commands • type / to browse commands • /model and /provider to change${C.reset}`;
   console.log(helpText);
 
   console.log();
