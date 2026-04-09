@@ -29,7 +29,7 @@ const C = {
   bgGray: "\x1b[100m",
 } as const;
 
-const APP_VERSION = "0.1.1";
+const APP_VERSION = "0.2.0";
 const MAX_SURFACE_WIDTH = 118;
 
 type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
@@ -727,71 +727,32 @@ export interface PromptFrameState {
   input: string;
   cursor: number;
   placeholder: string;
-  footer: string;
+  footerLines: string[];
   isHome?: boolean;
 }
 
 export interface PromptFrameRender {
   cursorCol: number;
+  cursorRow: number;
   lines: string[];
 }
 
-function composePromptFrameTop(
-  cwd: string,
-  modelLabel: string,
-  width: number,
-  isHome: boolean,
-): string {
-  const maxModel = Math.max(12, Math.floor(width * 0.34));
-  const rightPlain = truncate(modelLabel, maxModel);
-  const homeTag = isHome ? " [home]" : "";
-  const maxCwd = Math.max(14, width - rightPlain.length - 12);
-  const leftPlain = truncate(`${compactPath(cwd)}${homeTag}`, maxCwd);
-
-  const prefix = `${C.gray}╭─ ${C.reset}`;
-  const suffix = `${C.gray} ─╮${C.reset}`;
-  const left = isHome
-    ? `${C.yellow}${leftPlain}${C.reset}`
-    : `${C.white}${leftPlain}${C.reset}`;
-  const right = `${C.magenta}${rightPlain}${C.reset}`;
-  const fill = "─".repeat(
-    Math.max(
-      1,
-      width -
-        visibleLength(prefix) -
-        visibleLength(suffix) -
-        leftPlain.length -
-        rightPlain.length,
-    ),
-  );
-
-  return `${prefix}${left}${C.gray}${fill}${C.reset}${right}${suffix}`;
+function composePromptFrameTop(width: number): string {
+  const innerWidth = Math.max(20, width - 4);
+  return `${C.gray}╭${"─".repeat(innerWidth)}╮${C.reset}`;
 }
 
-function composePromptFrameBottom(footer: string, width: number): string {
-  const prefix = `${C.gray}╰─ ${C.reset}`;
-  const suffix = `${C.gray} ─╯${C.reset}`;
-  const captionPlain = truncate(footer, Math.max(18, width - 10));
-  const caption = `${C.dim}${captionPlain}${C.reset}`;
-  const fill = "─".repeat(
-    Math.max(
-      1,
-      width -
-        visibleLength(prefix) -
-        visibleLength(suffix) -
-        captionPlain.length,
-    ),
-  );
-
-  return `${prefix}${caption}${C.gray}${fill}${suffix}`;
+function composePromptFrameBottom(width: number): string {
+  const innerWidth = Math.max(20, width - 4);
+  return `${C.gray}╰${"─".repeat(innerWidth)}╯${C.reset}`;
 }
 
 export function renderPromptFrame(state: PromptFrameState): PromptFrameRender {
   const width = panelWidth();
-  const inner = Math.max(20, width - 4);
-  const prompt = `${C.bold}${C.cyan}❯${C.reset} `;
+  const innerWidth = Math.max(20, width - 4);
+  const prompt = `${C.gray}>${C.reset} `;
   const promptVisible = visibleLength(prompt);
-  const inputWidth = Math.max(10, inner - promptVisible);
+  const inputWidth = Math.max(10, innerWidth - promptVisible - 2);
   const input = state.input;
 
   let displayStart = 0;
@@ -816,21 +777,29 @@ export function renderPromptFrame(state: PromptFrameState): PromptFrameRender {
     input.length > 0
       ? visibleInput
       : `${C.dim}${truncate(state.placeholder, inputWidth)}${C.reset}`;
+  const footerLines = state.footerLines.map((line) => {
+    const clipped = truncateVisible(line, width);
+    if (clipped.length === 0) return "";
+
+    const trimmed = clipped.trimStart();
+    if (trimmed.startsWith(">")) {
+      return `${C.white}${clipped}${C.reset}`;
+    }
+
+    return `${C.gray}${clipped}${C.reset}`;
+  });
 
   const lines = [
-    composePromptFrameTop(
-      state.cwd,
-      state.modelLabel,
-      width,
-      Boolean(state.isHome),
-    ),
-    `${C.gray}│ ${C.reset}${prompt}${padVisible(content, inputWidth)}${C.gray} │${C.reset}`,
-    composePromptFrameBottom(state.footer, width),
+    composePromptFrameTop(width),
+    `${C.gray}│${C.reset} ${prompt}${padVisible(content, inputWidth)} ${C.gray}│${C.reset}`,
+    composePromptFrameBottom(width),
+    ...footerLines,
   ];
 
   return {
     lines,
     cursorCol: 2 + promptVisible + Math.max(0, state.cursor - displayStart),
+    cursorRow: 1,
   };
 }
 
@@ -843,7 +812,7 @@ export function userPrompt(inputPreview = ""): void {
     input: inputPreview,
     cursor: inputPreview.length,
     placeholder: "Describe a scan target or threat to review",
-    footer: "/ commands • ? quick ask",
+    footerLines: ["/ commands • ? quick ask"],
   });
   process.stdout.write(`${frame.lines.join("\n")}\n`);
 }
@@ -905,33 +874,39 @@ export function banner(state: BannerState): void {
   if (activeSpinner) activeSpinner.stop();
 
   const width = panelWidth();
-  const logoLines = CrackCodeLogo()
-    .trim()
+  const logoContent = CrackCodeLogo().trim();
+  const logoLines = logoContent
     .split("\n")
     .map((line) => `${C.cyan}${line}${C.reset}`);
+
+  // Build system info for right side
   const gitLabel = state.gitBranch
     ? `${C.green}yes${C.reset} ${C.white}(${state.gitBranch})${C.reset}`
     : `${C.dim}no${C.reset}`;
-  const identity = truncateVisible(
-    `${C.gray}host${C.reset} ${C.white}${state.host}${C.reset} ${C.gray}:${C.reset} ${C.cyan}${state.osUser}${C.reset}   ${C.gray}git${C.reset} ${gitLabel}   ${C.dim}v${APP_VERSION}${C.reset}`,
-    width,
-  );
-  const greetingName = state.userName?.trim() || state.osUser;
-  const greeting = truncateVisible(
-    `${C.bold}${C.white}Hello ${greetingName}, what are we cracking today?${C.reset}`,
-    width,
-  );
-  const subtitle = truncateVisible(
-    `${C.dim}Security review shell for vulnerabilities, exploit paths, and remediations.${C.reset}`,
-    width,
-  );
+  // Draw banner
+  console.log();
+
+  // Logo
+  for (const line of logoLines) {
+    console.log(line);
+  }
 
   console.log();
-  for (const line of logoLines) console.log(line);
+
+  // Title and version
+  const greetingName = state.userName?.trim() || state.osUser;
+  const titleLine = `${C.white}crack-code${C.reset} ${C.dim}v${APP_VERSION}${C.reset}`;
+  console.log(titleLine);
+
   console.log();
-  console.log(identity);
+  // Greeting
+  const greeting = `${C.bold}${C.white}Hello ${greetingName}, what are we cracking today?${C.reset}`;
   console.log(greeting);
-  console.log(subtitle);
+
+  // Help text
+  const helpText = `${C.dim}/help for commands • /model and /provider to change${C.reset}`;
+  console.log(helpText);
+
   console.log();
 }
 
