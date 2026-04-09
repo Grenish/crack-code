@@ -22,16 +22,15 @@ import { createWebSearchTool } from "./tools/web-search.js";
 import { runAgent } from "./agent.js";
 import { startRepl } from "./repl.js";
 import * as ui from "./ui/renderer.js";
+import { APP_VERSION } from "./version.js";
 
 // Version
-
-const VERSION = "0.1.1";
 
 // Help
 
 function printHelp(): void {
   console.log(`
-\x1b[1m\x1b[36mCrack Code\x1b[0m \x1b[90mv${VERSION}\x1b[0m
+\x1b[1m\x1b[36mCrack Code\x1b[0m \x1b[90mv${APP_VERSION}\x1b[0m
 AI-powered vulnerability scanning CLI for security-focused code review.
 
 \x1b[1mUsage:\x1b[0m
@@ -66,7 +65,7 @@ AI-powered vulnerability scanning CLI for security-focused code review.
 
 \x1b[1mInteractive commands:\x1b[0m
   /help       Show commands        /clear      Clear history
-  /exit       Exit                 /mode       Toggle edit mode
+  /exit       Exit                 /permission   Choose edit mode
   /usage      Token usage          /model      Show model info
   /policy     Show/set policy      /compact    Reduce context size
   /marketplace   Community tools
@@ -175,7 +174,7 @@ async function main(): Promise<void> {
   }
 
   if (flags.version || flags.v) {
-    console.log(`crack-code v${VERSION}`);
+    console.log(`crack-code v${APP_VERSION}`);
     process.exit(0);
   }
 
@@ -241,7 +240,10 @@ async function main(): Promise<void> {
 
   // Create permission manager
 
-  const permissions = new PermissionManager(config.permissionPolicy);
+  const permissions = new PermissionManager(
+    config.permissionPolicy,
+    config.allowEdits,
+  );
 
   // Route: one-shot vs REPL
 
